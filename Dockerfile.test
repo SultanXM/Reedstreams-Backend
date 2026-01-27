@@ -1,0 +1,17 @@
+FROM docker.io/rust:1-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    libssl-dev \
+    pkg-config \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY tests ./tests
+
+RUN cargo build --tests
+
+CMD ["cargo", "test"]

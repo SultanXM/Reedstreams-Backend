@@ -1,0 +1,12 @@
+/target
+Cargo.lock
+**/*.rs.bk
+# i think i'm the only one who uses this so i won't share it for now
+.env
+.env.prod
+keys/
+logs/*
+!logs/.gitkeep
+
+# if you're going the lite route and want to just run this personally i would push the db to your repo but it's your choice
+db.sqlite

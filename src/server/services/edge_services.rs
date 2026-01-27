@@ -1,0 +1,64 @@
+use std::sync::Arc;
+
+use tracing::info;
+
+use crate::{
+    config::AppConfig,
+    database::RedisDatabase,
+    server::{
+        services::{
+            cookie_services::CookieService, ppvsu_services::PpvsuService,
+            stream_services::StreamsService,
+        },
+        utils::signature_utils::SignatureUtil,
+    },
+};
+
+use super::{
+    cookie_services::DynCookieService, ppvsu_services::DynPpvsuService,
+    rate_limit_services::DynRateLimitService, stream_services::DynStreamsService,
+};
+
+/// edge services without database dependencies
+/// only uses Redis (or valkey goated) for caching and rate limiting
+#[derive(Clone)]
+pub struct EdgeServices {
+    pub signature_util: Arc<SignatureUtil>,
+    pub streams: DynStreamsService,
+    pub ppvsu: DynPpvsuService,
+    pub rate_limit: DynRateLimitService,
+    pub cookies: DynCookieService,
+    pub redis: Arc<RedisDatabase>,
+    pub config: Arc<AppConfig>,
+}
+
+impl EdgeServices {
+    pub fn new(redis_db: RedisDatabase, config: Arc<AppConfig>) -> Self {
+        info!("starting edge services (no database)...");
+
+        let signature_util = Arc::new(SignatureUtil::new(config.access_token_secret.clone()));
+
+        info!("signature util ok, starting remaining services...");
+        let redis_repository = Arc::new(redis_db);
+
+        let ppvsu = Arc::new(PpvsuService::new(redis_repository.clone())) as DynPpvsuService;
+        let streams = Arc::new(StreamsService::new(redis_repository.clone(), ppvsu.clone()))
+            as DynStreamsService;
+
+        let rate_limit = Arc::new(super::rate_limit_services::EdgeRateLimitService::new(
+            redis_repository.clone(),
+        )) as DynRateLimitService;
+
+        let cookies = Arc::new(CookieService::new(redis_repository.clone())) as DynCookieService;
+
+        Self {
+            signature_util,
+            streams,
+            ppvsu,
+            rate_limit,
+            cookies,
+            redis: redis_repository,
+            config,
+        }
+    }
+}
