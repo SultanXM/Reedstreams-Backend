@@ -86,11 +86,13 @@ impl CookieServiceTrait for CookieService {
         for cookie in cookies {
             // Set-Cookie format: name=value; attr1; attr2...
             // only want the name=value part
-            if let Some(cookie_value) = cookie.split(';').next()
-                && let Some((name, _)) = cookie_value.split_once('=')
-            {
-                cookie_map.insert(name.trim().to_string(), cookie_value.trim().to_string());
-            }
+            let Some(cookie_value) = cookie.split(';').next() else {
+                continue;
+            };
+            let Some((name, _)) = cookie_value.split_once('=') else {
+                continue;
+            };
+            cookie_map.insert(name.trim().to_string(), cookie_value.trim().to_string());
         }
 
         // join all cookies into a single Cookie header value

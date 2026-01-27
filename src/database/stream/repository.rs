@@ -38,7 +38,7 @@ impl StreamsRepository for RedisDatabase {
             let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
-                .arg(&pattern)
+                .arg(pattern)
                 .query_async(&mut conn)
                 .await?;
 
@@ -58,11 +58,20 @@ impl StreamsRepository for RedisDatabase {
         for key in keys {
             if key.contains(':') {
                 let parts: Vec<&str> = key.split(':').collect();
-                if parts.len() == 2
-                    && let Ok(game_id) = parts[1].parse::<i64>()
-                    && let Some(game) = self.get_game(parts[0], game_id).await?
-                    && current_time - game.start_time > twenty_four_hours
-                {
+
+                if parts.len() != 2 {
+                    continue;
+                }
+
+                let Ok(game_id) = parts[1].parse::<i64>() else {
+                    continue;
+                };
+
+                let Some(game) = self.get_game(parts[0], game_id).await? else {
+                    continue;
+                };
+
+                if current_time - game.start_time > twenty_four_hours {
                     self.delete_game(parts[0], game_id).await?;
                     continue;
                 }

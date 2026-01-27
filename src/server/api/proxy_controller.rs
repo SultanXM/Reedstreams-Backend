@@ -721,19 +721,12 @@ impl ProxyController {
         target_url: &str,
         client_id: &str,
         services: &EdgeServices,
-        schema: &str,
+        _schema: &str,
     ) -> AppResult<String> {
         // matcher for later if needed
-        match schema {
-            // "movie" => {
-            //     debug!("Processing with movie schema");
-            //     not needed
-            //     Self::process_m3u8_movie(text, target_url, client_id, services)
-            // }
-            _ => {
-                debug!("Processing with sports schema");
-                Self::process_m3u8(text, target_url, client_id, services)
-            }
+        {
+            debug!("Processing with sports schema");
+            Self::process_m3u8(text, target_url, client_id, services)
         }
     }
 
