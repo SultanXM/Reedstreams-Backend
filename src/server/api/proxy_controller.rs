@@ -718,7 +718,7 @@ impl ProxyController {
                 // and will respect the client's Accept-Encoding when sending the response back
                 let accept_encoding = "gzip, deflate, br, zstd";
 
-                if target_url.contains("strm.poocloud.in") {
+                if target_url.contains("poocloud.in") {
                     request_builder = request_builder
                         .header(header::ORIGIN, "https://ppvs.su")
                         .header(header::ACCEPT, "*/*")
