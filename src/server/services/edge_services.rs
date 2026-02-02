@@ -16,7 +16,8 @@ use crate::{
 
 use super::{
     cookie_services::DynCookieService, ppvsu_services::DynPpvsuService,
-    rate_limit_services::DynRateLimitService, stream_services::DynStreamsService,
+    proxy_cache_services::DynProxyCacheService, rate_limit_services::DynRateLimitService,
+    stream_services::DynStreamsService,
 };
 
 /// edge services without database dependencies
@@ -28,6 +29,8 @@ pub struct EdgeServices {
     pub ppvsu: DynPpvsuService,
     pub rate_limit: DynRateLimitService,
     pub cookies: DynCookieService,
+    pub proxy_cache: DynProxyCacheService,
+    pub http: reqwest::Client,
     pub redis: Arc<RedisDatabase>,
     pub config: Arc<AppConfig>,
 }
@@ -51,12 +54,20 @@ impl EdgeServices {
 
         let cookies = Arc::new(CookieService::new(redis_repository.clone())) as DynCookieService;
 
+        let proxy_cache = Arc::new(super::proxy_cache_services::ProxyCacheService::new(
+            redis_repository.clone(),
+        )) as DynProxyCacheService;
+
+        let http = reqwest::Client::new();
+
         Self {
             signature_util,
             streams,
             ppvsu,
             rate_limit,
             cookies,
+            proxy_cache,
+            http,
             redis: redis_repository,
             config,
         }

@@ -1,0 +1,7 @@
+name = "edge-proxy-cache-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# adjust your route here
+# [routes]
+# route = "yourdomain.com/api/v1/proxy*"

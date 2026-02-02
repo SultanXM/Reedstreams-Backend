@@ -111,7 +111,7 @@ impl ProxyController {
         );
         response_headers.insert(
             header::CACHE_CONTROL,
-            "no-cache"
+            "no-store"
                 .parse()
                 .expect("Static header value should parse"),
         );
@@ -170,6 +170,43 @@ impl ProxyController {
         let schema = params.schema.as_deref().unwrap_or("sports");
         debug!("Proxying (schema={}): {}", schema, target_url);
 
+        if schema == "sports" {
+            let (cached_m3u8, cached_segment) = services.proxy_cache.get_cached(&target_url).await;
+
+            if let Some(raw_m3u8) = cached_m3u8 {
+                debug!("Cache HIT (m3u8) for {}", target_url);
+                let processed_body = Self::process_m3u8_by_schema_with_retry(
+                    &raw_m3u8,
+                    &target_url,
+                    &client_id,
+                    &services,
+                    schema,
+                )?;
+                return Self::build_m3u8_response(&processed_body, &headers);
+            }
+
+            if let Some(cached_bytes) = cached_segment {
+                debug!(
+                    "Cache HIT (segment, {} bytes) for {}",
+                    cached_bytes.len(),
+                    target_url
+                );
+                return Self::build_segment_response(&cached_bytes, &headers, schema, false);
+            }
+
+            debug!("Cache MISS for {}", target_url);
+
+            // Check if a prefetch is in-flight for this URL; if so, wait for it
+            if let Some(cached_bytes) = services.proxy_cache.wait_for_inflight(&target_url).await {
+                debug!(
+                    "Got segment from inflight prefetch ({} bytes) for {}",
+                    cached_bytes.len(),
+                    target_url
+                );
+                return Self::build_segment_response(&cached_bytes, &headers, schema, false);
+            }
+        }
+
         // extract domain for cookie handling
         let domain = CookieService::extract_domain(&target_url);
 
@@ -180,9 +217,8 @@ impl ProxyController {
             None
         };
 
-        let client = reqwest::Client::new();
         let mut request_builder =
-            Self::apply_schema_headers(client.get(&target_url), schema, &target_url, &headers);
+            Self::apply_schema_headers(services.http.get(&target_url), schema, &target_url, &headers);
 
         // add cookies to request
         if let Some(cookies) = stored_cookies {
@@ -354,6 +390,27 @@ impl ProxyController {
             })?;
             debug!("M3U8 text length: {} chars", text.len());
 
+            // Cache raw m3u8 text (before URL rewriting) for sports schema
+            if schema == "sports" {
+                let cache = services.proxy_cache.clone();
+                let url_clone = target_url.clone();
+                let text_clone = text.clone();
+                tokio::spawn(async move {
+                    cache.cache_m3u8(&url_clone, &text_clone).await;
+                });
+
+                // Extract segment URLs and spawn background prefetch (skip the first —
+                // the client is already requesting it, so prefetching it just adds lock overhead)
+                let mut segment_urls = Self::extract_segment_urls(&text, &target_url);
+                if segment_urls.len() > 1 {
+                    segment_urls.remove(0);
+                    let prefetch_cache = services.proxy_cache.clone();
+                    tokio::spawn(async move {
+                        prefetch_cache.prefetch_segments(segment_urls).await;
+                    });
+                }
+            }
+
             let processed_body = Self::process_m3u8_by_schema_with_retry(
                 &text,
                 &target_url,
@@ -368,95 +425,112 @@ impl ProxyController {
 
             Ok(Self::build_m3u8_response(&processed_body, &headers)?)
         } else {
-            let full_bytes = decompressed;
-            let total_len = full_bytes.len();
-
-            // this is loop hell
-            let (response_bytes, status_code, range_header) = if let Some(range_value) =
-                headers.get(header::RANGE)
-            {
-                if let Ok(range_str) = range_value.to_str() {
-                    // parse "bytes=start-end" format
-                    if let Some(range_part) = range_str.strip_prefix("bytes=") {
-                        let parts: Vec<&str> = range_part.split('-').collect();
-                        if parts.len() == 2 {
-                            let start: usize = parts[0].parse().unwrap_or(0);
-                            let end: usize = if parts[1].is_empty() {
-                                total_len.saturating_sub(1)
-                            } else {
-                                parts[1].parse().unwrap_or(total_len.saturating_sub(1))
-                            };
-                            let end = end.min(total_len.saturating_sub(1));
-
-                            if start < total_len && start <= end {
-                                let sliced = full_bytes[start..=end].to_vec();
-                                let content_range =
-                                    format!("bytes {}-{}/{}", start, end, total_len);
-                                debug!("Serving range {}-{} of {} bytes", start, end, total_len);
-                                (sliced, StatusCode::PARTIAL_CONTENT, Some(content_range))
-                            } else {
-                                (full_bytes, StatusCode::OK, None)
-                            }
-                        } else {
-                            (full_bytes, StatusCode::OK, None)
-                        }
-                    } else {
-                        (full_bytes, StatusCode::OK, None)
-                    }
-                } else {
-                    (full_bytes, StatusCode::OK, None)
-                }
-            } else {
-                (full_bytes, StatusCode::OK, None)
-            };
-
-            // determine client's preferred encoding
-            let encoding = ContentEncoding::from_accept_encoding(
-                headers
-                    .get(header::ACCEPT_ENCODING)
-                    .and_then(|v| v.to_str().ok()),
-            );
-
-            let mut response_headers = HeaderMap::new();
-
-            response_headers.insert(
-                header::CONTENT_TYPE,
-                "video/mp2t"
-                    .parse()
-                    .expect("Static header value should parse"),
-            );
-
-            let cache_control = if is_mp4 {
-                "public, max-age=3600"
-            } else {
-                "public, max-age=31536000"
-            };
-
-            response_headers.insert(
-                header::CACHE_CONTROL,
-                cache_control
-                    .parse()
-                    .expect("Static header value should parse"),
-            );
-
-            // indicate we accept ranges
-            response_headers.insert(
-                header::ACCEPT_RANGES,
-                "bytes".parse().expect("Static header value should parse"),
-            );
-
-            // Add Content-Range header if this is a range response
-            if let Some(range_val) = range_header {
-                response_headers.insert(
-                    header::CONTENT_RANGE,
-                    range_val.parse().expect("Range header should parse"),
-                );
+            // Cache decompressed segment bytes for sports schema (fire-and-forget)
+            if schema == "sports" {
+                let cache = services.proxy_cache.clone();
+                let url_clone = target_url.clone();
+                let bytes_clone = decompressed.clone();
+                tokio::spawn(async move {
+                    cache.cache_segment(&url_clone, &bytes_clone).await;
+                });
             }
 
-            // only compress full responses
-            let final_bytes = if encoding != ContentEncoding::None
-                && status_code != StatusCode::PARTIAL_CONTENT
-            {
+            Self::build_segment_response(&decompressed, &headers, schema, is_mp4)
+        }
+    }
+
+    async fn proxy_options() -> impl IntoResponse {
+        StatusCode::NO_CONTENT
+    }
+
+    /// Apply Range header logic to full bytes, returning (sliced_bytes, status_code, optional Content-Range).
+    fn apply_range(
+        full_bytes: &[u8],
+        headers: &HeaderMap,
+    ) -> (Vec<u8>, StatusCode, Option<String>) {
+        let total_len = full_bytes.len();
+        if let Some(range_value) = headers.get(header::RANGE) {
+            if let Ok(range_str) = range_value.to_str() {
+                if let Some(range_part) = range_str.strip_prefix("bytes=") {
+                    let parts: Vec<&str> = range_part.split('-').collect();
+                    if parts.len() == 2 {
+                        let start: usize = parts[0].parse().unwrap_or(0);
+                        let end: usize = if parts[1].is_empty() {
+                            total_len.saturating_sub(1)
+                        } else {
+                            parts[1].parse().unwrap_or(total_len.saturating_sub(1))
+                        };
+                        let end = end.min(total_len.saturating_sub(1));
+
+                        if start < total_len && start <= end {
+                            let sliced = full_bytes[start..=end].to_vec();
+                            let content_range = format!("bytes {}-{}/{}", start, end, total_len);
+                            debug!("Serving range {}-{} of {} bytes", start, end, total_len);
+                            return (sliced, StatusCode::PARTIAL_CONTENT, Some(content_range));
+                        }
+                    }
+                }
+            }
+        }
+        (full_bytes.to_vec(), StatusCode::OK, None)
+    }
+
+    /// Build a complete segment (TS/MP4) response with range handling, compression, and cache headers.
+    fn build_segment_response(
+        full_bytes: &[u8],
+        headers: &HeaderMap,
+        schema: &str,
+        is_mp4: bool,
+    ) -> AppResult<Response> {
+        let (response_bytes, status_code, range_header) = Self::apply_range(full_bytes, headers);
+
+        let encoding = ContentEncoding::from_accept_encoding(
+            headers
+                .get(header::ACCEPT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+        );
+
+        let mut response_headers = HeaderMap::new();
+
+        response_headers.insert(
+            header::CONTENT_TYPE,
+            "video/mp2t"
+                .parse()
+                .expect("Static header value should parse"),
+        );
+
+        // Sports segments get shorter browser cache (live content changes),
+        // MP4 gets 1 hour, other schemas keep the long cache
+        let cache_control = if is_mp4 {
+            "public, max-age=3600"
+        } else if schema == "sports" {
+            "public, max-age=300"
+        } else {
+            "public, max-age=31536000"
+        };
+
+        response_headers.insert(
+            header::CACHE_CONTROL,
+            cache_control
+                .parse()
+                .expect("Static header value should parse"),
+        );
+
+        response_headers.insert(
+            header::ACCEPT_RANGES,
+            "bytes".parse().expect("Static header value should parse"),
+        );
+
+        if let Some(range_val) = range_header {
+            response_headers.insert(
+                header::CONTENT_RANGE,
+                range_val.parse().expect("Range header should parse"),
+            );
+        }
+
+        // Only compress full responses (not partial content - Safari expects raw bytes for ranges)
+        let final_bytes =
+            if encoding != ContentEncoding::None && status_code != StatusCode::PARTIAL_CONTENT {
                 let compressed_bytes = encoding.compress(&response_bytes).map_err(|e| {
                     error!(
                         "Failed to compress binary response with {:?}: {}",
@@ -488,21 +562,16 @@ impl ProxyController {
                 response_bytes
             };
 
-            response_headers.insert(
-                header::CONTENT_LENGTH,
-                final_bytes
-                    .len()
-                    .to_string()
-                    .parse()
-                    .expect("Content length should parse"),
-            );
+        response_headers.insert(
+            header::CONTENT_LENGTH,
+            final_bytes
+                .len()
+                .to_string()
+                .parse()
+                .expect("Content length should parse"),
+        );
 
-            Ok((status_code, response_headers, final_bytes).into_response())
-        }
-    }
-
-    async fn proxy_options() -> impl IntoResponse {
-        StatusCode::NO_CONTENT
+        Ok((status_code, response_headers, final_bytes).into_response())
     }
 
     // function that sometimes fixed issues that i had above
@@ -893,4 +962,52 @@ impl ProxyController {
 
     //     Ok(lines.join("\n"))
     // }
+
+    /// Extract resolved segment URLs from raw m3u8 text.
+    /// Only returns URLs preceded by #EXTINF: (actual media segments),
+    /// skipping variant/child m3u8 playlist references.
+    fn extract_segment_urls(text: &str, target_url: &str) -> Vec<String> {
+        let base_url = match url::Url::parse(target_url) {
+            Ok(u) => u,
+            Err(_) => return Vec::new(),
+        };
+
+        let base_path = format!(
+            "{}://{}{}",
+            base_url.scheme(),
+            base_url.host_str().unwrap_or(""),
+            &base_url.path()[..base_url.path().rfind('/').unwrap_or(0) + 1]
+        );
+
+        let mut urls = Vec::new();
+        let mut prev_was_extinf = false;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("#EXTINF:") {
+                prev_was_extinf = true;
+                continue;
+            }
+
+            if prev_was_extinf && !trimmed.is_empty() && !trimmed.starts_with('#') {
+                let resolved = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    Some(trimmed.to_string())
+                } else {
+                    url::Url::parse(&base_path)
+                        .and_then(|base| base.join(trimmed))
+                        .ok()
+                        .map(|u| u.to_string())
+                };
+
+                if let Some(url) = resolved {
+                    urls.push(url);
+                }
+            }
+
+            prev_was_extinf = false;
+        }
+
+        urls
+    }
 }
