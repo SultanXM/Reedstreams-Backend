@@ -1,14 +1,13 @@
 // all the stream related functions, im not commenting on all of them, they're pretty readable
-use aes::cipher::{KeyIvInit, StreamCipher};
 use async_trait::async_trait;
 use base64::Engine;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
 use flate2::read::GzDecoder;
 use mockall::automock;
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{error, info};
-
-type Aes256Ctr = ctr::Ctr64BE<aes::Aes256>;
 
 use crate::{
     database::{
@@ -20,15 +19,16 @@ use crate::{
 
 pub type DynPpvsuService = Arc<dyn PpvsuServiceTrait + Send + Sync>;
 
-/// ROT-47 cipher - rotates ASCII characters by 47 positions per ppvsu standard for whatever reason
+/// ROT-71 cipher - rotates ASCII characters by 71 positions
+/// This transforms the custom charset to valid standard base64
 /// Range: 33 ('!') to 126 ('~') = 94 characters
-fn rot47_decode(input: &str) -> String {
+fn rot71_decode(input: &str) -> String {
     input
         .chars()
         .map(|c| {
             let code = c as u32;
             if (33..=126).contains(&code) {
-                char::from_u32(33 + ((code - 33) + 47) % 94).unwrap_or(c)
+                char::from_u32(33 + ((code - 33) + 71) % 94).unwrap_or(c)
             } else {
                 c
             }
@@ -45,7 +45,7 @@ fn encode_variant(mut n: usize, out: &mut Vec<u8>) {
 }
 
 /// Parse protobuf message with 2 length-delimited fields
-/// 1 (0x0a): ROT-47 encoded ciphertext (ASCII text)
+/// 1 (0x0a): Custom charset encoded ciphertext (requires ROT-71 → base64 → ChaCha20)
 /// 2 (0x12): stream name
 fn parse_protobuf(buffer: &[u8]) -> AppResult<(String, Option<String>)> {
     let mut offset = 0;
@@ -94,20 +94,18 @@ fn parse_protobuf(buffer: &[u8]) -> AppResult<(String, Option<String>)> {
     })
 }
 
-/// AES-256-CTR decryption
-/// key: full `what` header (32 bytes UTF-8)
-/// IV: "STOPSTOPSTOPSTOP" (16 bytes)
-const AES_IV: &[u8; 16] = b"STOPSTOPSTOPSTOP";
+/// ChaCha20 decryption with counter=1
+/// Key: full `island` header (32 bytes UTF-8)
+/// Nonce: first 12 bytes of decoded ciphertext
+/// Counter starts at 1, not 0 (critical for correct decryption)
+fn chacha20_decrypt(decoded_data: &[u8], key: &str) -> AppResult<String> {
+    use chacha20::cipher::StreamCipherSeek;
 
-fn aes_ctr_decrypt(base64_ciphertext: &str, key: &str) -> AppResult<String> {
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(base64_ciphertext)
-        .map_err(|e| {
-            Error::InternalServerErrorWithContext(format!(
-                "failed to base64 decode ciphertext: {}",
-                e
-            ))
-        })?;
+    if decoded_data.len() < 12 {
+        return Err(Error::InternalServerErrorWithContext(
+            "decoded data too short to contain nonce".to_string(),
+        ));
+    }
 
     let key_bytes = key.as_bytes();
     if key_bytes.len() != 32 {
@@ -117,31 +115,57 @@ fn aes_ctr_decrypt(base64_ciphertext: &str, key: &str) -> AppResult<String> {
         )));
     }
 
-    let mut cipher = Aes256Ctr::new(key_bytes.into(), AES_IV.into());
-    let mut buffer = ciphertext;
+    // First 12 bytes are the nonce, rest is ciphertext
+    let nonce = &decoded_data[..12];
+    let ciphertext = &decoded_data[12..];
+
+    // Create cipher with 32-byte key and 12-byte nonce
+    let mut cipher = ChaCha20::new(key_bytes.into(), nonce.into());
+
+    // Seek to block 1 (64 bytes) - counter starts at 1, not 0
+    cipher.seek(64u64);
+
+    let mut buffer = ciphertext.to_vec();
     cipher.apply_keystream(&mut buffer);
 
-    String::from_utf8(buffer).map_err(|e| {
-        Error::InternalServerErrorWithContext(format!(
-            "failed to convert decrypted data to UTF-8: {}",
-            e
-        ))
-    })
+    // Extract URL (ends with .m3u8, may have trailing garbage)
+    let plaintext = String::from_utf8_lossy(&buffer);
+    if let Some(end_idx) = plaintext.find(".m3u8") {
+        Ok(plaintext[..end_idx + 5].to_string())
+    } else {
+        // Fallback: return up to first null byte or non-printable char
+        let clean: String = plaintext
+            .chars()
+            .take_while(|c| c.is_ascii() && !c.is_ascii_control())
+            .collect();
+        Ok(clean)
+    }
 }
 
-/// Full decryption pipeline
-/// b64 decode response → protobuf bytes
-/// parse protobuf → field1 (ROT-47 encoded ciphertext)
-/// ROT-47 decode field1 → base64 AES ciphertext
-/// AES-256-CTR decrypt with what header as key
-fn decrypt_stream_url(encrypted_blob: &[u8], what_header: &str) -> AppResult<String> {
-    info!(encrypted_blob);
-
+/// New decryption pipeline (2024 update)
+/// Parse protobuf → field1 (custom charset encoded)
+/// ROT-71 decode field1 → standard base64
+/// Base64 decode → [nonce (12 bytes) || ciphertext]
+/// ChaCha20 decrypt with island header as key, counter=1
+fn decrypt_stream_url(encrypted_blob: &[u8], island_header: &str) -> AppResult<String> {
+    // Step 1: Parse protobuf to extract field1 (encoded ciphertext)
     let (encoded_ciphertext, _stream_name) = parse_protobuf(encrypted_blob)?;
 
-    let base64_ciphertext = rot47_decode(&encoded_ciphertext);
+    // Step 2: ROT-71 transform to get valid standard base64
+    let base64_ciphertext = rot71_decode(&encoded_ciphertext);
 
-    let decrypted_url = aes_ctr_decrypt(&base64_ciphertext, what_header)?;
+    // Step 3: Base64 decode to get binary [nonce || ciphertext]
+    let decoded_data = base64::engine::general_purpose::STANDARD
+        .decode(&base64_ciphertext)
+        .map_err(|e| {
+            Error::InternalServerErrorWithContext(format!(
+                "failed to base64 decode after ROT-71: {}",
+                e
+            ))
+        })?;
+
+    // Step 4: ChaCha20 decrypt (nonce is first 12 bytes, counter=1)
+    let decrypted_url = chacha20_decrypt(&decoded_data, island_header)?;
 
     Ok(decrypted_url)
 }
@@ -318,19 +342,19 @@ impl PpvsuServiceTrait for PpvsuService {
             )));
         }
 
-        let what_header = response
+        let island_header = response
             .headers()
-            .get("what")
+            .get("island")
             .and_then(|h| h.to_str().ok())
             .ok_or_else(|| {
-                error!("missing 'what' header in response");
+                error!("missing 'island' header in response");
                 Error::InternalServerErrorWithContext(
-                    "missing 'what' header in response".to_string(),
+                    "missing 'island' header in response".to_string(),
                 )
             })?
             .to_string();
 
-        info!("received 'what' header ({} chars)", what_header.len());
+        info!("received 'island' header ({} chars)", island_header.len());
 
         let encrypted_blob = response.bytes().await.map_err(|e| {
             error!("failed to read response bytes: {}", e);
@@ -338,8 +362,8 @@ impl PpvsuServiceTrait for PpvsuService {
         })?;
         info!("received encrypted blob ({} chars)", encrypted_blob.len());
 
-        // pipeline to get the m3u8 link
-        let video_link = decrypt_stream_url(&encrypted_blob, &what_header)?;
+        // Protobuf parse → ROT-71 decode → Base64 decode → ChaCha20 decrypt
+        let video_link = decrypt_stream_url(&encrypted_blob, &island_header)?;
         info!("decrypted video link: {}", video_link);
 
         // cache the decrypted video link using stream_path as key
