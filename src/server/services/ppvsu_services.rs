@@ -1,8 +1,8 @@
 // all the stream related functions, im not commenting on all of them, they're pretty readable
 use async_trait::async_trait;
 use base64::Engine;
-use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use flate2::read::GzDecoder;
 use mockall::automock;
 use std::io::Read;
@@ -102,7 +102,7 @@ fn chacha20_decrypt(decoded_data: &[u8], key: &str) -> AppResult<String> {
     use chacha20::cipher::StreamCipherSeek;
 
     if decoded_data.len() < 12 {
-        return Err(Error::InternalServerErrorWithContext(
+        return Err(Error::InternalServerErrorWithContext(r
             "decoded data too short to contain nonce".to_string(),
         ));
     }
@@ -188,10 +188,6 @@ pub struct PpvsuService {
     http_client: reqwest::Client,
 }
 
-/// cache TTL for decrypted URLs (1 hour in seconds)
-/// this can be changed to your liking, I think 1 hour works fine but meh
-const DECRYPTED_URL_CACHE_TTL: u64 = 3600;
-
 impl PpvsuService {
     pub fn new(redis: Arc<RedisDatabase>) -> Self {
         // i like to make it look like a real browser but it's really not needed
@@ -275,6 +271,8 @@ impl PpvsuService {
         Ok(game)
     }
 }
+
+const VIDEO_LINK_CACHE_TTL_SECS: u64 = 300;
 
 #[async_trait]
 impl PpvsuServiceTrait for PpvsuService {
@@ -366,15 +364,14 @@ impl PpvsuServiceTrait for PpvsuService {
         let video_link = decrypt_stream_url(&encrypted_blob, &island_header)?;
         info!("decrypted video link: {}", video_link);
 
-        // cache the decrypted video link using stream_path as key
+        // Cache the decrypted video link
         if let Err(e) = self
             .repository
-            .set_video_link(stream_path, &video_link, DECRYPTED_URL_CACHE_TTL)
+            .set_video_link(stream_path, &video_link, VIDEO_LINK_CACHE_TTL_SECS)
             .await
         {
             error!("failed to cache video link: {}", e);
-            // i don't want to fail the request just because I missed cache and couldn't put it in
-            // there
+            // Don't fail the request, just log the error
         }
 
         Ok(video_link)

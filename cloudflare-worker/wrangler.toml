@@ -3,5 +3,5 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
 # adjust your route here
-# [routes]
-# route = "yourdomain.com/api/v1/proxy*"
+  [routes]
+  route = "https://reedstreams-edge-v1.fly.dev/api/v1/proxy*"
