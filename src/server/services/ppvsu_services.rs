@@ -102,7 +102,7 @@ fn chacha20_decrypt(decoded_data: &[u8], key: &str) -> AppResult<String> {
     use chacha20::cipher::StreamCipherSeek;
 
     if decoded_data.len() < 12 {
-        return Err(Error::InternalServerErrorWithContext(r
+        return Err(Error::InternalServerErrorWithContext(
             "decoded data too short to contain nonce".to_string(),
         ));
     }

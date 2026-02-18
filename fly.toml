@@ -30,9 +30,7 @@ primary_region = 'dfw'
     type = "connections"
 
   [[services.http_checks]]
-    interval = "10s"
-    grace_period = "5s"
-    method = "get"
-    path = "/api/v1/streams" # Change this to your actual health check or root path
-    protocol = "http"
-    timeout = "2s"
+  interval = "15s"      # Check less often (default is usually 10s)
+  timeout = "5s"        # Wait 5s for an answer (default is 2s)
+  grace_period = "10s"  # Give it 10s to wake up before failing
+  restart_limit = 0     # Don't restart it just because it missed a ping
