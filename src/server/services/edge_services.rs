@@ -43,6 +43,9 @@ impl EdgeServices {
 
         info!("signature util ok, starting remaining services...");
         let redis_repository = Arc::new(redis_db);
+        
+        // Define http client early so it can be used by other services
+        let http = reqwest::Client::new();
 
         let ppvsu = Arc::new(PpvsuService::new(redis_repository.clone())) as DynPpvsuService;
         let streams = Arc::new(StreamsService::new(redis_repository.clone(), ppvsu.clone()))
@@ -54,11 +57,11 @@ impl EdgeServices {
 
         let cookies = Arc::new(CookieService::new(redis_repository.clone())) as DynCookieService;
 
+        // Passed http.clone() here to satisfy the 2-argument requirement
         let proxy_cache = Arc::new(super::proxy_cache_services::ProxyCacheService::new(
             redis_repository.clone(),
+            http.clone(),
         )) as DynProxyCacheService;
-
-        let http = reqwest::Client::new();
 
         Self {
             signature_util,

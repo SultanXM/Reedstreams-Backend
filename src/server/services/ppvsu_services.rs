@@ -194,7 +194,6 @@ impl PpvsuService {
         let http_client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0")
             .timeout(std::time::Duration::from_secs(30))
-            .http2_adaptive_window(true)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
