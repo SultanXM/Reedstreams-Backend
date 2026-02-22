@@ -209,11 +209,11 @@ impl PpvsuService {
 
         let response = self
             .http_client
-            .get(format!("https://api.ppvs.su/api/streams/{}", game_id))
+            .get(format!("https://api.ppv.to/api/streams/{}", game_id))
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Referer", "https://api.ppvs.su/api/streams/")
-            .header("Origin", "https://api.ppvs.su/api/streams")
+            .header("Referer", "https://api.ppv.to/api/streams/")
+            .header("Origin", "https://api.ppv.to/api/streams")
             .header("Sec-Fetch-Dest", "empty")
             .header("Sec-Fetch-Mode", "cors")
             .header("Sec-Fetch-Site", "same-origin")
@@ -384,23 +384,23 @@ impl PpvsuServiceTrait for PpvsuService {
         //
         // also just going to drop the future here because there is no point for me to actually
         // check it
-        let _ = self.http_client.get("https://api.ppvs.su/api/ping")
+        let _ = self.http_client.get("https://api.ppv.to/api/ping")
             .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0")
             .header("Accept", "application/json")
             .header("Accept-Language", "en-US,en;q=0.5")
             .header("Accept-Encoding", "gzip, deflate, br, zstd")
-            .header("Referer", "https://ppvs.su/")
-            .header("Origin", "https://ppvs.su")
+            .header("Referer", "https://ppv.to/")
+            .header("Origin", "https://ppv.to")
             .header("Sec-GPC", "1")
             .send();
         let response = self
             .http_client
-            .get("https://api.ppvs.su/api/streams")
+            .get("https://api.ppv.to/api/streams")
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "en-US,en;q=0.9")
             .header("Accept-Encoding", "gzip, deflate, br")
-            .header("Referer", "https://api.ppvs.su/api/streams/")
-            .header("Origin", "https://api.ppvs.su/api/streams")
+            .header("Referer", "https://api.ppv.to/api/streams/")
+            .header("Origin", "https://api.ppv.to/api/streams")
             .header("DNT", "1")
             .header("Sec-Fetch-Dest", "empty")
             .header("Sec-Fetch-Mode", "cors")

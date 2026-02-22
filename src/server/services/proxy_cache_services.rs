@@ -43,10 +43,10 @@ pub struct ProxyCacheService {
 }
 
 impl ProxyCacheService {
-    pub fn new(redis: Arc<RedisDatabase>) -> Self {
+    pub fn new(redis: Arc<RedisDatabase>, http: reqwest::Client) -> Self {
         Self {
             redis,
-            http: reqwest::Client::new(),
+            http,
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -85,10 +85,21 @@ impl ProxyCacheService {
                     reqwest::header::USER_AGENT,
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 );
+        }
+        if url.contains("modifiles.fans") {
+            request_builder = request_builder
+                .header(reqwest::header::ORIGIN, "https://pooembed.eu")
+                .header(reqwest::header::ACCEPT, "*/*")
+                .header(reqwest::header::ACCEPT_ENCODING, accept_encoding)
+                .header(reqwest::header::REFERER, "https://pooembed.eu/")
+                .header(
+                    reqwest::header::USER_AGENT,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                );
         } else {
             request_builder = request_builder
-                .header(reqwest::header::REFERER, "https://api.ppvs.su/api/streams/")
-                .header(reqwest::header::ORIGIN, "https://api.ppvs.su/api/streams")
+                .header(reqwest::header::REFERER, "https://api.ppv.to/api/streams/")
+                .header(reqwest::header::ORIGIN, "https://api.ppv.to/api/streams")
                 .header(
                     reqwest::header::USER_AGENT,
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

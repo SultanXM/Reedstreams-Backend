@@ -226,7 +226,10 @@ impl ProxyController {
             request_builder = request_builder.header(header::COOKIE, cookies);
         }
 
-        debug!("Sending request to target");
+        debug!(
+            "Sending request to target with builder: {:?}",
+            request_builder
+        );
 
         let target_response = request_builder.send().await.map_err(|e| {
             error!("Request failed: {}", e);
@@ -399,11 +402,11 @@ impl ProxyController {
                     cache.cache_m3u8(&url_clone, &text_clone).await;
                 });
 
-                // Extract segment URLs and spawn background prefetch (skip the first —
-                // the client is already requesting it, so prefetching it just adds lock overhead)
-                let mut segment_urls = Self::extract_segment_urls(&text, &target_url);
-                if segment_urls.len() > 1 {
-                    segment_urls.remove(0);
+                // Extract segment URLs and spawn background prefetch for all segments.
+                // The first segment is included so the client can get a cache hit or
+                // wait on the inflight prefetch instead of doing a cold upstream fetch.
+                let segment_urls = Self::extract_segment_urls(&text, &target_url);
+                if !segment_urls.is_empty() {
                     let prefetch_cache = services.proxy_cache.clone();
                     tokio::spawn(async move {
                         prefetch_cache.prefetch_segments(segment_urls).await;
@@ -737,10 +740,30 @@ impl ProxyController {
                         .header("Priority", "u=4")
                         .header(header::PRAGMA, "no-cache")
                         .header(header::CACHE_CONTROL, "no-cache")
-                } else {
+                }
+                if target_url.contains("modifiles.fans") {
                     request_builder = request_builder
-                        .header(header::REFERER, "https://api.ppvs.su/api/streams/")
-                        .header(header::ORIGIN, "https://api.ppvs.su/api/streams")
+                        .header(header::ORIGIN, "https://pooembed.eu")
+                        .header(header::ACCEPT, "*/*")
+                        .header(header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+                        .header(header::ACCEPT_ENCODING, accept_encoding)
+                        .header(header::REFERER, "https://pooembed.eu/")
+                        .header(
+                            header::USER_AGENT,
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        )
+                        .header("Sec-GPC", "1")
+                        .header("Sec-Fetch-Dest", "empty")
+                        .header("Sec-Fetch-Mode", "cors")
+                        .header("Sec-Fetch-Site", "cross-site")
+                        .header(header::CONNECTION, "keep-alive")
+                        .header("Priority", "u=4")
+
+                }
+                else {
+                    request_builder = request_builder
+                        .header(header::REFERER, "https://api.ppv.to/api/streams/")
+                        .header(header::ORIGIN, "https://api.ppv.to/api/streams")
                         .header(
                             header::USER_AGENT,
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -770,8 +793,8 @@ impl ProxyController {
                 let accept_encoding = "gzip, deflate, br, zstd";
 
                 request_builder = request_builder
-                    .header(header::REFERER, "https://api.ppvs.su/api/streams/")
-                    .header(header::ORIGIN, "https://api.ppvs.su/api/streams")
+                    .header(header::REFERER, "https://api.ppv.to/api/streams/")
+                    .header(header::ORIGIN, "https://api.ppv.to/api/streams")
                     .header(
                         header::USER_AGENT,
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

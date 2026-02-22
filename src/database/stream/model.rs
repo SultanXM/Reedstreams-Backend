@@ -5,7 +5,7 @@ use std::sync::Arc;
 /// type hell
 ///
 /// defaults should probably be made for Stream and Game but whatever
-/// these are all based on the https://api.ppvs.su/api/streams/api/streams response structure.
+/// these are all based on the https://api.ppv.to/api/streams/api/streams response structure.
 ///
 /// these are all nested iterations of each other and are used to capture input. The "Game" type is
 /// what I actually cache and take care of
