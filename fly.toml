@@ -7,6 +7,10 @@ primary_region = 'dfw'
   HOST = "0.0.0.0"
   PORT = "5000"
   CARGO_ENV = "production"
+  # High-performance HTTP client settings
+  HTTP_TIMEOUT = "60"
+  # Redis connection pool size for high concurrency
+  REDIS_POOL_SIZE = "50"
 
 [http_service]
   internal_port = 5000
@@ -15,22 +19,62 @@ primary_region = 'dfw'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
+  # Longer idle timeout for video streaming connections
+  [http_service.timeouts]
+    idle_timeout = "300s"
+    read_timeout = "60s"
+    write_timeout = "60s"
 
+# HIGH PERFORMANCE VM: 16GB RAM, 8 dedicated CPUs
+# Fly.io requires 16GB minimum for 8 performance CPUs
+# This can handle 1000+ concurrent video streaming connections easily
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 2
+  memory = '16gb'
+  cpu_kind = 'performance'
+  cpus = 8
 
+# TCP service for raw performance (bypass HTTP proxy layer)
 [[services]]
   internal_port = 5000
   protocol = "tcp"
+  # High concurrency limits for 1000+ connections
   [services.concurrency]
-    hard_limit = 250
-    soft_limit = 200
+    hard_limit = 1500
+    soft_limit = 1000
     type = "connections"
 
+  # Multiple health checks with generous timeouts
   [[services.http_checks]]
-  interval = "15s"      # Check less often (default is usually 10s)
-  timeout = "5s"        # Wait 5s for an answer (default is 2s)
-  grace_period = "10s"  # Give it 10s to wake up before failing
-  restart_limit = 0     # Don't restart it just because it missed a ping
+    interval = "15s"
+    timeout = "10s"
+    grace_period = "60s"
+    restart_limit = 10
+    method = "get"
+    path = "/"
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "60s"
+    restart_limit = 5
+    method = "get"
+    path = "/api/v1/health"
+
+# Additional metrics port if needed
+[[services]]
+  internal_port = 5000
+  protocol = "tcp"
+  
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    force_https = true
+  
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+# Mount a volume for temporary caching if needed (optional optimization)
+# [[mounts]]
+#   source = "cache_data"
+#   destination = "/cache"

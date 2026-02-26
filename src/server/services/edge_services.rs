@@ -44,8 +44,21 @@ impl EdgeServices {
         info!("signature util ok, starting remaining services...");
         let redis_repository = Arc::new(redis_db);
         
-        // Define http client early so it can be used by other services
-        let http = reqwest::Client::new();
+        // High-performance HTTP client for 1000+ concurrent connections
+        // Tuned for video streaming with connection pooling and keep-alive
+        let http = reqwest::Client::builder()
+            // Pool size: enough for 1000+ concurrent upstream connections
+            .pool_max_idle_per_host(200)
+            // Connection timeout for establishing new connections
+            .connect_timeout(std::time::Duration::from_secs(10))
+            // Overall request timeout - must be longer than health checks
+            .timeout(std::time::Duration::from_secs(60))
+            // Idle connections live longer for streaming workloads
+            .pool_idle_timeout(std::time::Duration::from_secs(120))
+            // TCP keep-alive to prevent connection drops
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()
+            .expect("Failed to build HTTP client");
 
         let ppvsu = Arc::new(PpvsuService::new(redis_repository.clone())) as DynPpvsuService;
         let streams = Arc::new(StreamsService::new(redis_repository.clone(), ppvsu.clone()))

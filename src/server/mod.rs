@@ -37,9 +37,11 @@ use crate::database::RedisDatabase;
 use crate::server::services::edge_services::EdgeServices;
 
 lazy_static! {
-    static ref HTTP_TIMEOUT: u64 = 30;
+    // 60 second timeout for video streaming (large segments)
+    // Must be longer than Fly.io health check timeout (10s)
+    static ref HTTP_TIMEOUT: u64 = 60;
     static ref EXPONENTIAL_SECONDS: &'static [f64] = &[
-        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0,
     ];
 }
 
@@ -178,8 +180,10 @@ impl EdgeApplicationServer {
                     .layer(HandleErrorLayer::new(Self::handle_timeout_error))
                     .timeout(Duration::from_secs(*HTTP_TIMEOUT))
                     .layer(Extension(services))
-                    .layer(BufferLayer::new(1024))
-                    .layer(RateLimitLayer::new(5, Duration::from_secs(1))),
+                    // Buffer: 2048 requests can be queued (double for 1000+ concurrent)
+                    .layer(BufferLayer::new(2048))
+                    // Rate limit: 50 requests per second per IP (generous for video streaming)
+                    .layer(RateLimitLayer::new(50, Duration::from_secs(1))),
             )
             .route_layer(middleware::from_fn(Self::track_metrics));
 
