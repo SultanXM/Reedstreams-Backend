@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
-use crate::database::RedisDatabase;
+use base64::Engine;
+use crate::database::Database;
 
 const M3U8_TTL_SECONDS: u64 = 10;
 const SEGMENT_TTL_SECONDS: u64 = 300;
@@ -37,15 +37,15 @@ pub trait ProxyCacheServiceTrait {
 }
 
 pub struct ProxyCacheService {
-    redis: Arc<RedisDatabase>,
+    db: Arc<Database>,
     http: reqwest::Client,
     inflight: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl ProxyCacheService {
-    pub fn new(redis: Arc<RedisDatabase>, http: reqwest::Client) -> Self {
+    pub fn new(db: Arc<Database>, http: reqwest::Client) -> Self {
         Self {
-            redis,
+            db,
             http,
             inflight: Mutex::new(HashMap::new()),
         }
@@ -68,7 +68,7 @@ impl ProxyCacheService {
     /// Fetch a single segment from upstream with sports-style headers, decompress, and cache it.
     async fn fetch_and_cache_segment(
         http: &reqwest::Client,
-        redis: &Arc<RedisDatabase>,
+        db: &Arc<Database>,
         url: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let accept_encoding = "gzip, deflate, br, zstd";
@@ -134,12 +134,23 @@ impl ProxyCacheService {
             _ => bytes.to_vec(),
         };
 
-        // Cache in Redis
+        // Cache the segment
         let key = Self::segment_key(url);
-        let mut conn = redis.connection.clone();
-        let _: Result<(), redis::RedisError> = conn
-            .set_ex(&key, &decompressed[..], SEGMENT_TTL_SECONDS)
-            .await;
+        
+        match db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
+                let _: Result<(), redis::RedisError> = conn
+                    .set_ex(&key, &decompressed[..], SEGMENT_TTL_SECONDS)
+                    .await;
+            }
+            Database::Memory(mem) => {
+                // Store binary data as base64 string for in-memory
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&decompressed);
+                let _ = mem.store.set_ex(&key, &encoded, SEGMENT_TTL_SECONDS).await;
+            }
+        }
 
         debug!(
             "Prefetched and cached segment ({} bytes): {}",
@@ -155,17 +166,42 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
     async fn get_cached(&self, url: &str) -> (Option<String>, Option<Vec<u8>>) {
         let m3u8_key = Self::m3u8_key(url);
         let seg_key = Self::segment_key(url);
-        let mut conn = self.redis.connection.clone();
 
-        // Pipeline both GETs into a single round trip
-        let result: Result<(Option<String>, Option<Vec<u8>>), redis::RedisError> = redis::pipe()
-            .get(&m3u8_key)
-            .get(&seg_key)
-            .query_async(&mut conn)
-            .await;
+        match self.db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
 
-        match result {
-            Ok((m3u8, seg)) => {
+                // Pipeline both GETs into a single round trip
+                let result: Result<(Option<String>, Option<Vec<u8>>), redis::RedisError> = redis::pipe()
+                    .get(&m3u8_key)
+                    .get(&seg_key)
+                    .query_async(&mut conn)
+                    .await;
+
+                match result {
+                    Ok((m3u8, seg)) => {
+                        if m3u8.is_some() {
+                            debug!("Proxy cache HIT (m3u8) for {}", url);
+                        }
+                        if seg.is_some() {
+                            debug!("Proxy cache HIT (segment) for {}", url);
+                        }
+                        (m3u8, seg)
+                    }
+                    Err(e) => {
+                        error!("Proxy cache GET failed: {}", e);
+                        (None, None)
+                    }
+                }
+            }
+            Database::Memory(mem) => {
+                let m3u8 = mem.store.get(&m3u8_key).await.ok().flatten();
+                let seg = match mem.store.get(&seg_key).await {
+                    Ok(Some(encoded)) => base64::engine::general_purpose::STANDARD.decode(&encoded).ok(),
+                    _ => None,
+                };
+
                 if m3u8.is_some() {
                     debug!("Proxy cache HIT (m3u8) for {}", url);
                 }
@@ -174,43 +210,72 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
                 }
                 (m3u8, seg)
             }
-            Err(e) => {
-                error!("Proxy cache GET failed: {}", e);
-                (None, None)
-            }
         }
     }
 
     async fn cache_m3u8(&self, url: &str, text: &str) {
         let key = Self::m3u8_key(url);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(), redis::RedisError> = conn.set_ex(&key, text, M3U8_TTL_SECONDS).await;
+        match self.db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
+                let result: Result<(), redis::RedisError> = conn.set_ex(&key, text, M3U8_TTL_SECONDS).await;
 
-        match result {
-            Ok(_) => debug!(
-                "Cached m3u8 ({} bytes, TTL {}s)",
-                text.len(),
-                M3U8_TTL_SECONDS
-            ),
-            Err(e) => error!("Failed to cache m3u8: {}", e),
+                match result {
+                    Ok(_) => debug!(
+                        "Cached m3u8 ({} bytes, TTL {}s)",
+                        text.len(),
+                        M3U8_TTL_SECONDS
+                    ),
+                    Err(e) => error!("Failed to cache m3u8: {}", e),
+                }
+            }
+            Database::Memory(mem) => {
+                let result = mem.store.set_ex(&key, text, M3U8_TTL_SECONDS).await;
+                match result {
+                    Ok(_) => debug!(
+                        "Cached m3u8 ({} bytes, TTL {}s)",
+                        text.len(),
+                        M3U8_TTL_SECONDS
+                    ),
+                    Err(e) => error!("Failed to cache m3u8: {}", e),
+                }
+            }
         }
     }
 
     async fn cache_segment(&self, url: &str, bytes: &[u8]) {
         let key = Self::segment_key(url);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(), redis::RedisError> =
-            conn.set_ex(&key, bytes, SEGMENT_TTL_SECONDS).await;
+        match self.db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
+                let result: Result<(), redis::RedisError> =
+                    conn.set_ex(&key, bytes, SEGMENT_TTL_SECONDS).await;
 
-        match result {
-            Ok(_) => debug!(
-                "Cached segment ({} bytes, TTL {}s)",
-                bytes.len(),
-                SEGMENT_TTL_SECONDS
-            ),
-            Err(e) => error!("Failed to cache segment: {}", e),
+                match result {
+                    Ok(_) => debug!(
+                        "Cached segment ({} bytes, TTL {}s)",
+                        bytes.len(),
+                        SEGMENT_TTL_SECONDS
+                    ),
+                    Err(e) => error!("Failed to cache segment: {}", e),
+                }
+            }
+            Database::Memory(mem) => {
+                let encoded = base64::encode(bytes);
+                let result = mem.store.set_ex(&key, &encoded, SEGMENT_TTL_SECONDS).await;
+                match result {
+                    Ok(_) => debug!(
+                        "Cached segment ({} bytes, TTL {}s)",
+                        bytes.len(),
+                        SEGMENT_TTL_SECONDS
+                    ),
+                    Err(e) => error!("Failed to cache segment: {}", e),
+                }
+            }
         }
     }
 
@@ -232,30 +297,68 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
             return None;
         }
 
-        // Prefetch completed, check Redis for the cached segment
+        // Prefetch completed, check cache for the cached segment
         let seg_key = Self::segment_key(url);
-        let mut conn = self.redis.connection.clone();
-        let result: Result<Option<Vec<u8>>, redis::RedisError> = conn.get(&seg_key).await;
+        
+        match self.db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
+                let result: Result<Option<Vec<u8>>, redis::RedisError> = conn.get(&seg_key).await;
 
-        match result {
-            Ok(Some(bytes)) => {
-                debug!(
-                    "Got segment from cache after inflight wait ({} bytes): {}",
-                    bytes.len(),
-                    url
-                );
-                Some(bytes)
+                match result {
+                    Ok(Some(bytes)) => {
+                        debug!(
+                            "Got segment from cache after inflight wait ({} bytes): {}",
+                            bytes.len(),
+                            url
+                        );
+                        Some(bytes)
+                    }
+                    Ok(None) => {
+                        warn!(
+                            "Inflight prefetch completed but segment not in cache: {}",
+                            url
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        error!("Redis GET failed after inflight wait: {}", e);
+                        None
+                    }
+                }
             }
-            Ok(None) => {
-                warn!(
-                    "Inflight prefetch completed but segment not in cache: {}",
-                    url
-                );
-                None
-            }
-            Err(e) => {
-                error!("Redis GET failed after inflight wait: {}", e);
-                None
+            Database::Memory(mem) => {
+                let result = mem.store.get(&seg_key).await;
+                match result {
+                    Ok(Some(encoded)) => {
+                        match base64::engine::general_purpose::STANDARD.decode(&encoded) {
+                            Ok(bytes) => {
+                                debug!(
+                                    "Got segment from cache after inflight wait ({} bytes): {}",
+                                    bytes.len(),
+                                    url
+                                );
+                                Some(bytes)
+                            }
+                            Err(e) => {
+                                error!("Failed to decode segment after inflight wait: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        warn!(
+                            "Inflight prefetch completed but segment not in cache: {}",
+                            url
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        error!("Memory GET failed after inflight wait: {}", e);
+                        None
+                    }
+                }
             }
         }
     }
@@ -265,27 +368,42 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
             return;
         }
 
-        // Pipeline EXISTS checks for all segment keys in one round trip
-        let mut conn = self.redis.connection.clone();
-        let mut pipe = redis::pipe();
-        for url in &urls {
-            pipe.exists(Self::segment_key(url));
-        }
+        // Check which URLs are already cached
+        let uncached: Vec<String> = match self.db.as_ref() {
+            Database::Redis(redis) => {
+                use redis::AsyncCommands;
+                let mut conn = redis.connection.clone();
+                let mut pipe = redis::pipe();
+                for url in &urls {
+                    pipe.exists(Self::segment_key(url));
+                }
 
-        let exists_results: Vec<bool> = match pipe.query_async(&mut conn).await {
-            Ok(results) => results,
-            Err(e) => {
-                error!("Prefetch EXISTS pipeline failed: {}", e);
-                return;
+                let exists_results: Vec<bool> = match pipe.query_async(&mut conn).await {
+                    Ok(results) => results,
+                    Err(e) => {
+                        error!("Prefetch EXISTS pipeline failed: {}", e);
+                        return;
+                    }
+                };
+
+                urls.into_iter()
+                    .zip(exists_results.into_iter())
+                    .filter(|(_, exists)| !exists)
+                    .map(|(url, _)| url)
+                    .collect()
+            }
+            Database::Memory(mem) => {
+                let mut uncached = Vec::new();
+                for url in &urls {
+                    let key = Self::segment_key(url);
+                    match mem.store.get(&key).await {
+                        Ok(None) | Err(_) => uncached.push(url.clone()),
+                        Ok(Some(_)) => {} // Already cached
+                    }
+                }
+                uncached
             }
         };
-
-        let uncached: Vec<String> = urls
-            .into_iter()
-            .zip(exists_results.into_iter())
-            .filter(|(_, exists)| !exists)
-            .map(|(url, _)| url)
-            .collect();
 
         if uncached.is_empty() {
             debug!("All segments already cached, skipping prefetch");
@@ -310,11 +428,11 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
         // semaphore gates the actual upstream requests to 5 concurrent
         for url in uncached {
             let http = self.http.clone();
-            let redis = self.redis.clone();
+            let db = self.db.clone();
             let sem = semaphore.clone();
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
-                let result = Self::fetch_and_cache_segment(&http, &redis, &url).await;
+                let result = Self::fetch_and_cache_segment(&http, &db, &url).await;
                 (url, result)
             });
         }

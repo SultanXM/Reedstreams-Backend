@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use redis::AsyncCommands;
 use tracing::{debug, error};
 
-use crate::database::RedisDatabase;
+use crate::database::Database;
 
 /// ttl of 24hrs
 const COOKIE_TTL_SECONDS: u64 = 86400;
@@ -18,12 +17,12 @@ pub trait CookieServiceTrait {
 }
 
 pub struct CookieService {
-    redis: Arc<RedisDatabase>,
+    db: Arc<Database>,
 }
 
 impl CookieService {
-    pub fn new(redis: Arc<RedisDatabase>) -> Self {
-        Self { redis }
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
     }
 
     fn cookie_key(&self, domain: &str) -> String {
@@ -42,23 +41,47 @@ impl CookieService {
 impl CookieServiceTrait for CookieService {
     async fn get_cookies(&self, domain: &str) -> Option<String> {
         let key = self.cookie_key(domain);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<Option<String>, redis::RedisError> = conn.get(&key).await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
+                let result: Result<Option<String>, redis::RedisError> = conn.get(&key).await;
 
-        match result {
-            Ok(Some(cookies)) => {
-                debug!(
-                    "Loaded cookies for domain {}: {} bytes",
-                    domain,
-                    cookies.len()
-                );
-                Some(cookies)
+                match result {
+                    Ok(Some(cookies)) => {
+                        debug!(
+                            "Loaded cookies for domain {}: {} bytes",
+                            domain,
+                            cookies.len()
+                        );
+                        Some(cookies)
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        error!("Failed to get cookies for domain {}: {}", domain, e);
+                        None
+                    }
+                }
             }
-            Ok(None) => None,
-            Err(e) => {
-                error!("Failed to get cookies for domain {}: {}", domain, e);
-                None
+            Database::Memory(db) => {
+                let result = db.store.get(&key).await;
+
+                match result {
+                    Ok(Some(cookies)) => {
+                        debug!(
+                            "Loaded cookies for domain {}: {} bytes",
+                            domain,
+                            cookies.len()
+                        );
+                        Some(cookies)
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        error!("Failed to get cookies for domain {}: {}", domain, e);
+                        None
+                    }
+                }
             }
         }
     }
@@ -69,7 +92,6 @@ impl CookieServiceTrait for CookieService {
         }
 
         let key = self.cookie_key(domain);
-        let mut conn = self.redis.connection.clone();
 
         let mut cookie_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -98,20 +120,43 @@ impl CookieServiceTrait for CookieService {
         // join all cookies into a single Cookie header value
         let cookie_header: String = cookie_map.values().cloned().collect::<Vec<_>>().join("; ");
 
-        let result: Result<(), redis::RedisError> =
-            conn.set_ex(&key, &cookie_header, COOKIE_TTL_SECONDS).await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
+                let result: Result<(), redis::RedisError> =
+                    conn.set_ex(&key, &cookie_header, COOKIE_TTL_SECONDS).await;
 
-        match result {
-            Ok(_) => {
-                debug!(
-                    "Stored {} cookies for domain {} (TTL: {}s)",
-                    cookie_map.len(),
-                    domain,
-                    COOKIE_TTL_SECONDS
-                );
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            "Stored {} cookies for domain {} (TTL: {}s)",
+                            cookie_map.len(),
+                            domain,
+                            COOKIE_TTL_SECONDS
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to store cookies for domain {}: {}", domain, e);
+                    }
+                }
             }
-            Err(e) => {
-                error!("Failed to store cookies for domain {}: {}", domain, e);
+            Database::Memory(db) => {
+                let result = db.store.set_ex(&key, &cookie_header, COOKIE_TTL_SECONDS).await;
+
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            "Stored {} cookies for domain {} (TTL: {}s)",
+                            cookie_map.len(),
+                            domain,
+                            COOKIE_TTL_SECONDS
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to store cookies for domain {}: {}", domain, e);
+                    }
+                }
             }
         }
     }

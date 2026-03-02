@@ -6,9 +6,9 @@ use dotenvy::dotenv;
 
 use tracing::info;
 
-use api::{AppConfig, EdgeApplicationServer, Logger, RedisDatabase};
+use api::{AppConfig, Database, EdgeApplicationServer, Logger};
 
-// main function for edge version - no database, only redis
+// main function for edge version - no database, only redis (or in-memory if no redis)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
@@ -20,16 +20,17 @@ async fn main() -> anyhow::Result<()> {
     // logging is up to you, I like to use info! for general information on what to do
     info!("logger and env prepped (edge mode - no database)...");
 
-    info!("connecting to redis...");
+    info!("connecting to database...");
 
-    let redis_db = RedisDatabase::connect(&config.redis_url)
+    // Connect to database - uses Redis if REDIS_URL is provided, otherwise falls back to in-memory
+    let db = Database::connect(&config.redis_url)
         .await
-        .expect("where is the redis connection!!");
+        .expect("failed to initialize database");
 
-    info!("redis connection ok, starting edge server...");
+    info!("database connection ok, starting edge server...");
 
-    // serve the routes (edge mode - no database, only redis)
-    EdgeApplicationServer::serve(config, redis_db)
+    // serve the routes (edge mode - no database, only redis/memory)
+    EdgeApplicationServer::serve(config, db)
         .await
         .context("edge server failed to start")?;
 

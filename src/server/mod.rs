@@ -33,7 +33,7 @@ use tower_http::{
 use tracing::{debug, info};
 
 use crate::config::AppConfig;
-use crate::database::RedisDatabase;
+use crate::database::Database;
 use crate::server::services::edge_services::EdgeServices;
 
 lazy_static! {
@@ -103,7 +103,7 @@ macro_rules! cors_builder {
 pub struct EdgeApplicationServer;
 
 impl EdgeApplicationServer {
-    pub async fn serve(config: Arc<AppConfig>, redis_db: RedisDatabase) -> anyhow::Result<()> {
+    pub async fn serve(config: Arc<AppConfig>, db: Database) -> anyhow::Result<()> {
         // initialize app start time for uptime tracking
         let _ = APP_START_TIME.set(Instant::now());
 
@@ -117,7 +117,7 @@ impl EdgeApplicationServer {
             .install_recorder()
             .context("can't run the metric recorder")?;
 
-        let services = EdgeServices::new(redis_db, config.clone());
+        let services = EdgeServices::new(db, config.clone());
 
         // CORS configuration
         let cors_origins: Vec<String> = config
@@ -160,9 +160,10 @@ impl EdgeApplicationServer {
         )
         .expose_headers([header::CONTENT_LENGTH, header::CONTENT_RANGE]);
 
-        // edge routes, just streams, proxy, and health
+        // edge routes: streams, proxy, health, views (with CORS)
         let api_routes = Router::new()
             .nest("/streams", api::stream_controller::StreamController::app())
+            .nest("/views", api::views_controller::ViewsController::app())
             .route("/health", get(api::health_controller::health_endpoint))
             .layer(cors);
 
@@ -170,24 +171,27 @@ impl EdgeApplicationServer {
             .nest("/proxy", api::proxy_controller::ProxyController::app())
             .layer(proxy_cors);
 
-        let router = Router::new()
-            .nest("/api/v1", api_routes.merge(proxy_routes))
+        // Main API router - add chat route directly with correct path
+        let api_router = Router::new()
             .route("/", get(api::health_controller::health_endpoint))
             .route("/metrics", get(move || ready(recorder_handle.render())))
+            // Add chat route directly at the path we want
+            .route("/api/v1/chat/ws", get(api::chat_controller::ChatController::ws_handler))
+            // Nest other API routes
+            .nest("/api/v1", api_routes.merge(proxy_routes))
+            // Extension layer provides services to ALL routes above
+            .layer(Extension(services))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
                     .layer(HandleErrorLayer::new(Self::handle_timeout_error))
                     .timeout(Duration::from_secs(*HTTP_TIMEOUT))
-                    .layer(Extension(services))
-                    // Buffer: 2048 requests can be queued (double for 1000+ concurrent)
                     .layer(BufferLayer::new(2048))
-                    // Rate limit: 50 requests per second per IP (generous for video streaming)
                     .layer(RateLimitLayer::new(50, Duration::from_secs(1))),
             )
             .route_layer(middleware::from_fn(Self::track_metrics));
 
-        let router = router.fallback(Self::handle_404);
+        let router = api_router.fallback(Self::handle_404);
 
         let port = format!("0.0.0.0:{}", config.port);
         let addr = tokio::net::TcpListener::bind(&port).await.unwrap();

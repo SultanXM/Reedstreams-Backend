@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use redis::AsyncCommands;
 use tracing::{debug, error, info, warn};
 
-use crate::database::RedisDatabase;
+use crate::database::Database;
 
 #[derive(Clone)]
 pub struct RateLimitConfig {
@@ -74,14 +73,14 @@ pub trait RateLimitServiceTrait {
 /// rate limiting based on client identifiers (probably not the most reliable so you can just
 /// increaxe the limits if you see timeouts occuring too much)
 pub struct EdgeRateLimitService {
-    redis: Arc<RedisDatabase>,
+    db: Arc<Database>,
     config: RateLimitConfig,
 }
 
 impl EdgeRateLimitService {
-    pub fn new(redis: Arc<RedisDatabase>) -> Self {
+    pub fn new(db: Arc<Database>) -> Self {
         Self {
-            redis,
+            db,
             config: RateLimitConfig::default(),
         }
     }
@@ -110,18 +109,53 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         }
 
         let key = self.rate_limit_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(u32, i32, i64), redis::RedisError> = redis::pipe()
-            .atomic()
-            .incr(&key, 1u32)
-            .expire(&key, self.config.window_seconds as i64)
-            .ttl(&key)
-            .query_async(&mut conn)
-            .await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok((count, _expire_result, ttl)) => {
+                let result: Result<(u32, i32, i64), redis::RedisError> = redis::pipe()
+                    .atomic()
+                    .incr(&key, 1u32)
+                    .expire(&key, self.config.window_seconds as i64)
+                    .ttl(&key)
+                    .query_async(&mut conn)
+                    .await;
+
+                match result {
+                    Ok((count, _expire_result, ttl)) => {
+                        let reset_at = chrono::Utc::now().timestamp() + ttl;
+
+                        if count > self.config.max_requests_per_window {
+                            debug!(
+                                "Client {} rate limited: {} requests in window",
+                                client_id, count
+                            );
+                            RateLimitResult::RateLimited {
+                                retry_after: ttl.max(1) as u64,
+                            }
+                        } else {
+                            RateLimitResult::Allowed {
+                                remaining: self.config.max_requests_per_window.saturating_sub(count),
+                                reset_at,
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Rate limit check failed for client {}: {}", client_id, e);
+                        RateLimitResult::Allowed {
+                            remaining: 0,
+                            reset_at: chrono::Utc::now().timestamp()
+                                + self.config.window_seconds as i64,
+                        }
+                    }
+                }
+            }
+            Database::Memory(db) => {
+                // For in-memory, we need to handle the increment + TTL manually
+                let count = db.store.incr(&key, 1).await.unwrap_or(1);
+                let ttl = self.config.window_seconds as i64;
                 let reset_at = chrono::Utc::now().timestamp() + ttl;
 
                 if count > self.config.max_requests_per_window {
@@ -139,29 +173,55 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
                     }
                 }
             }
-            Err(e) => {
-                error!("Rate limit check failed for client {}: {}", client_id, e);
-                RateLimitResult::Allowed {
-                    remaining: 0,
-                    reset_at: chrono::Utc::now().timestamp() + self.config.window_seconds as i64,
-                }
-            }
         }
     }
 
     async fn record_error(&self, client_id: &str, error_type: &str) {
         let key = self.error_count_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(u32, i32), redis::RedisError> = redis::pipe()
-            .atomic()
-            .incr(&key, 1u32)
-            .expire(&key, self.config.error_window_seconds as i64)
-            .query_async(&mut conn)
-            .await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok((count, _expire_result)) => {
+                let result: Result<(u32, i32), redis::RedisError> = redis::pipe()
+                    .atomic()
+                    .incr(&key, 1u32)
+                    .expire(&key, self.config.error_window_seconds as i64)
+                    .query_async(&mut conn)
+                    .await;
+
+                match result {
+                    Ok((count, _expire_result)) => {
+                        debug!(
+                            "Client {} error recorded ({}): count now {}",
+                            client_id, error_type, count
+                        );
+
+                        if count >= self.config.max_errors_before_timeout {
+                            warn!(
+                                "Client {} exceeded error threshold ({} errors), applying timeout",
+                                client_id, count
+                            );
+                            self.timeout_user(
+                                client_id,
+                                &format!(
+                                    "Automatic timeout: {} errors in {} seconds",
+                                    count, self.config.error_window_seconds
+                                ),
+                                self.config.timeout_duration_seconds,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to record error for client {}: {}", client_id, e);
+                    }
+                }
+            }
+            Database::Memory(db) => {
+                let count = db.store.incr(&key, 1).await.unwrap_or(1);
+
                 debug!(
                     "Client {} error recorded ({}): count now {}",
                     client_id, error_type, count
@@ -183,79 +243,143 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
                     .await;
                 }
             }
-            Err(e) => {
-                error!("Failed to record error for client {}: {}", client_id, e);
-            }
         }
     }
 
     async fn is_user_timed_out(&self, client_id: &str) -> Option<(String, u64)> {
         let key = self.timeout_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(Option<String>, i64), redis::RedisError> = redis::pipe()
-            .get(&key)
-            .ttl(&key)
-            .query_async(&mut conn)
-            .await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok((Some(reason), ttl)) if ttl > 0 => Some((reason, ttl as u64)),
-            Ok(_) => None,
-            Err(e) => {
-                error!("Failed to check timeout for client {}: {}", client_id, e);
-                None
+                let result: Result<(Option<String>, i64), redis::RedisError> = redis::pipe()
+                    .get(&key)
+                    .ttl(&key)
+                    .query_async(&mut conn)
+                    .await;
+
+                match result {
+                    Ok((Some(reason), ttl)) if ttl > 0 => Some((reason, ttl as u64)),
+                    Ok(_) => None,
+                    Err(e) => {
+                        error!("Failed to check timeout for client {}: {}", client_id, e);
+                        None
+                    }
+                }
+            }
+            Database::Memory(db) => {
+                let result = db.store.get(&key).await;
+                let ttl_result = db.store.ttl(&key).await;
+
+                match (result, ttl_result) {
+                    (Ok(Some(reason)), Ok(ttl)) if ttl > 0 => Some((reason, ttl as u64)),
+                    _ => None,
+                }
             }
         }
     }
 
     async fn timeout_user(&self, client_id: &str, reason: &str, duration_seconds: u64) {
         let key = self.timeout_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<(), redis::RedisError> =
-            conn.set_ex(&key, reason, duration_seconds).await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok(_) => {
-                info!(
-                    "Client {} timed out for {} seconds: {}",
-                    client_id, duration_seconds, reason
-                );
+                let result: Result<(), redis::RedisError> =
+                    conn.set_ex(&key, reason, duration_seconds).await;
+
+                match result {
+                    Ok(_) => {
+                        info!(
+                            "Client {} timed out for {} seconds: {}",
+                            client_id, duration_seconds, reason
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to timeout client {}: {}", client_id, e);
+                    }
+                }
             }
-            Err(e) => {
-                error!("Failed to timeout client {}: {}", client_id, e);
+            Database::Memory(db) => {
+                let result = db.store.set_ex(&key, reason, duration_seconds).await;
+
+                match result {
+                    Ok(_) => {
+                        info!(
+                            "Client {} timed out for {} seconds: {}",
+                            client_id, duration_seconds, reason
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to timeout client {}: {}", client_id, e);
+                    }
+                }
             }
         }
     }
 
     async fn clear_timeout(&self, client_id: &str) -> bool {
         let key = self.timeout_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<i32, redis::RedisError> = conn.del(&key).await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok(deleted) => deleted > 0,
-            Err(e) => {
-                error!("Failed to clear timeout for client {}: {}", client_id, e);
-                false
+                let result: Result<i32, redis::RedisError> = conn.del(&key).await;
+
+                match result {
+                    Ok(deleted) => deleted > 0,
+                    Err(e) => {
+                        error!("Failed to clear timeout for client {}: {}", client_id, e);
+                        false
+                    }
+                }
+            }
+            Database::Memory(db) => {
+                let result = db.store.del(&key).await;
+
+                match result {
+                    Ok(deleted) => deleted > 0,
+                    Err(e) => {
+                        error!("Failed to clear timeout for client {}: {}", client_id, e);
+                        false
+                    }
+                }
             }
         }
     }
 
     async fn get_error_count(&self, client_id: &str) -> u32 {
         let key = self.error_count_key(client_id);
-        let mut conn = self.redis.connection.clone();
 
-        let result: Result<Option<u32>, redis::RedisError> = conn.get(&key).await;
+        match self.db.as_ref() {
+            Database::Redis(db) => {
+                use redis::AsyncCommands;
+                let mut conn = db.connection.clone();
 
-        match result {
-            Ok(Some(count)) => count,
-            Ok(None) => 0,
-            Err(e) => {
-                error!("Failed to get error count for client {}: {}", client_id, e);
-                0
+                let result: Result<Option<u32>, redis::RedisError> = conn.get(&key).await;
+
+                match result {
+                    Ok(Some(count)) => count,
+                    Ok(None) => 0,
+                    Err(e) => {
+                        error!("Failed to get error count for client {}: {}", client_id, e);
+                        0
+                    }
+                }
+            }
+            Database::Memory(db) => {
+                let result = db.store.get(&key).await;
+
+                match result {
+                    Ok(Some(count_str)) => count_str.parse().unwrap_or(0),
+                    _ => 0,
+                }
             }
         }
     }

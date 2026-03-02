@@ -18,8 +18,8 @@ pub struct AppConfig {
     // #[clap(long, env, default_value = "sqlite:///app/db.sqlite")]
     // pub database_url: String,
 
-    // redis url for the connection
-    #[clap(long, env)]
+    // redis url for the connection - if empty or not provided, uses in-memory database
+    #[clap(long, env, default_value = "")]
     pub redis_url: String,
 
     // db based and not needed for the edge
@@ -65,7 +65,7 @@ impl Default for AppConfig {
             cargo_env: CargoEnv::Development,
             port: 5000,
             // database_url: "sqlite:///app/db.sqlite".to_string(),
-            redis_url: "redis://localhost:6379".to_string(),
+            redis_url: "".to_string(),
             // run_migrations: false,
             access_token_secret: "default-access-secret".to_string(),
             // refresh_token_secret: "default-refresh-secret".to_string(),

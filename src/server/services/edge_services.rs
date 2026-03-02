@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::{
     config::AppConfig,
-    database::RedisDatabase,
+    database::Database,
     server::{
         services::{
             cookie_services::CookieService, ppvsu_services::PpvsuService,
@@ -15,9 +15,10 @@ use crate::{
 };
 
 use super::{
+    chat_services::ChatService,
     cookie_services::DynCookieService, ppvsu_services::DynPpvsuService,
     proxy_cache_services::DynProxyCacheService, rate_limit_services::DynRateLimitService,
-    stream_services::DynStreamsService,
+    stream_services::DynStreamsService, views_services::{DynViewsService, ViewsService},
 };
 
 /// edge services without database dependencies
@@ -30,19 +31,21 @@ pub struct EdgeServices {
     pub rate_limit: DynRateLimitService,
     pub cookies: DynCookieService,
     pub proxy_cache: DynProxyCacheService,
+    pub views: DynViewsService,
+    pub chat: Arc<ChatService>,
     pub http: reqwest::Client,
-    pub redis: Arc<RedisDatabase>,
+    pub db: Arc<Database>,
     pub config: Arc<AppConfig>,
 }
 
 impl EdgeServices {
-    pub fn new(redis_db: RedisDatabase, config: Arc<AppConfig>) -> Self {
+    pub fn new(db: Database, config: Arc<AppConfig>) -> Self {
         info!("starting edge services (no database)...");
 
         let signature_util = Arc::new(SignatureUtil::new(config.access_token_secret.clone()));
 
         info!("signature util ok, starting remaining services...");
-        let redis_repository = Arc::new(redis_db);
+        let db_arc = Arc::new(db);
         
         // High-performance HTTP client for 1000+ concurrent connections
         // Tuned for video streaming with connection pooling and keep-alive
@@ -60,21 +63,24 @@ impl EdgeServices {
             .build()
             .expect("Failed to build HTTP client");
 
-        let ppvsu = Arc::new(PpvsuService::new(redis_repository.clone())) as DynPpvsuService;
-        let streams = Arc::new(StreamsService::new(redis_repository.clone(), ppvsu.clone()))
+        let ppvsu = Arc::new(PpvsuService::new(db_arc.clone())) as DynPpvsuService;
+        let streams = Arc::new(StreamsService::new(db_arc.clone(), ppvsu.clone()))
             as DynStreamsService;
 
         let rate_limit = Arc::new(super::rate_limit_services::EdgeRateLimitService::new(
-            redis_repository.clone(),
+            db_arc.clone(),
         )) as DynRateLimitService;
 
-        let cookies = Arc::new(CookieService::new(redis_repository.clone())) as DynCookieService;
+        let cookies = Arc::new(CookieService::new(db_arc.clone())) as DynCookieService;
 
         // Passed http.clone() here to satisfy the 2-argument requirement
         let proxy_cache = Arc::new(super::proxy_cache_services::ProxyCacheService::new(
-            redis_repository.clone(),
+            db_arc.clone(),
             http.clone(),
         )) as DynProxyCacheService;
+
+        let views = Arc::new(ViewsService::new(db_arc.clone())) as DynViewsService;
+        let chat = Arc::new(ChatService::new());
 
         Self {
             signature_util,
@@ -83,8 +89,10 @@ impl EdgeServices {
             rate_limit,
             cookies,
             proxy_cache,
+            views,
+            chat,
             http,
-            redis: redis_repository,
+            db: db_arc,
             config,
         }
     }

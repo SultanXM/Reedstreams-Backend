@@ -76,7 +76,7 @@ pub async fn health_endpoint(
 }
 
 async fn check_redis_health(services: &EdgeServices) -> RedisHealth {
-    match services.redis.health_check().await {
+    match services.db.health_check().await {
         Ok(response_time) => RedisHealth {
             status: HealthStatus::Healthy,
             response_time_ms: response_time,

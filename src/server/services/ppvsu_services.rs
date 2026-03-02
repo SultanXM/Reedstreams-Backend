@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     database::{
-        RedisDatabase,
+        Database,
         stream::{DynStreamsRepository, Game, PpvsuApiResponse, PpvsuStreamDetailResponse},
     },
     server::error::{AppResult, Error},
@@ -189,7 +189,7 @@ pub struct PpvsuService {
 }
 
 impl PpvsuService {
-    pub fn new(redis: Arc<RedisDatabase>) -> Self {
+    pub fn new(db: Arc<Database>) -> Self {
         // i like to make it look like a real browser but it's really not needed
         let http_client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0")
@@ -198,7 +198,7 @@ impl PpvsuService {
             .unwrap_or_else(|_| reqwest::Client::new());
 
         Self {
-            repository: redis,
+            repository: db,
             http_client,
         }
     }
