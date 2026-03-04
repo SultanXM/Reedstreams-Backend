@@ -10,6 +10,7 @@ impl StreamsRepository for Database {
     // gets all streams from a provider
     async fn get_stream(&self, provider: &str) -> anyhow::Result<Option<Stream>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -32,6 +33,7 @@ impl StreamsRepository for Database {
     // get all streams no matter the provider
     async fn get_all_streams(&self) -> anyhow::Result<Vec<Stream>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -131,6 +133,7 @@ impl StreamsRepository for Database {
     // store a game with provider and id
     async fn store_game(&self, provider: &str, game: &Game) -> anyhow::Result<()> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -151,6 +154,7 @@ impl StreamsRepository for Database {
     // get a game with provider and id
     async fn get_game(&self, provider: &str, game_id: i64) -> anyhow::Result<Option<Game>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -169,6 +173,7 @@ impl StreamsRepository for Database {
     // get all games from a provider
     async fn get_games(&self, provider: &str) -> anyhow::Result<Vec<Game>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -231,6 +236,7 @@ impl StreamsRepository for Database {
     // flush it from storage
     async fn delete_game(&self, provider: &str, game_id: i64) -> anyhow::Result<()> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -249,6 +255,7 @@ impl StreamsRepository for Database {
     // used mainly for debugging
     async fn clear_cache(&self, provider: &str) -> anyhow::Result<()> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -296,6 +303,7 @@ impl StreamsRepository for Database {
     // last time the streams were fetched
     async fn set_last_fetch_time(&self, provider: &str, timestamp: i64) -> anyhow::Result<()> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -314,6 +322,7 @@ impl StreamsRepository for Database {
     // get the above
     async fn get_last_fetch_time(&self, provider: &str) -> anyhow::Result<Option<i64>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -332,6 +341,7 @@ impl StreamsRepository for Database {
     // get cached video link by stream_path
     async fn get_video_link(&self, stream_path: &str) -> anyhow::Result<Option<String>> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -354,6 +364,7 @@ impl StreamsRepository for Database {
         ttl_secs: u64,
     ) -> anyhow::Result<()> {
         match self {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();

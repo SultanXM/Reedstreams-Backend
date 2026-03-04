@@ -37,7 +37,7 @@ pub struct StreamListResponse {
     pub streams: Vec<ResponseStreamDto>,
 }
 
-// this is what's returned in json form
+// This is what's returned in json form
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GameDto {
     pub id: i64,
@@ -59,4 +59,29 @@ pub struct CategoryDto {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GameListResponse {
     pub categories: Vec<CategoryDto>,
+}
+
+// Sportsurge-specific DTOs - simplified
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SportsurgeEventDto {
+    pub id: String,
+    pub title: String,
+    pub league: String,
+    pub banner: String,
+    pub start_time: i64,
+    pub status: String,
+    pub is_live: bool,
+    pub event_path: String,
+    pub embed_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SportsurgeEventListResponse {
+    pub events: Vec<SportsurgeEventDto>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SportsurgeStreamResponse {
+    pub event_id: String,
+    pub embed_url: String,
 }

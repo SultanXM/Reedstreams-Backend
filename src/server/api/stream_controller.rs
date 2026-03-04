@@ -6,7 +6,7 @@ use serde::Serialize;
 use tracing::debug;
 use tracing::info;
 
-use crate::server::dtos::stream_dto::{GameDto, GameListResponse, ResponseStreamDto};
+use crate::server::dtos::stream_dto::{GameDto, GameListResponse, ResponseStreamDto, SportsurgeEventDto, SportsurgeEventListResponse, SportsurgeStreamResponse};
 use crate::server::error::AppResult;
 use crate::server::extractors::EdgeAuthentication;
 use crate::server::utils::signature_utils::SignatureUtil;
@@ -24,6 +24,7 @@ impl StreamController {
         Router::new()
             // all routes
             .route("/", get(Self::get_all_streams_endpoint))
+            // ppvsu routes
             .route("/ppvsu/cache", delete(Self::clear_ppvsu_cache_endpoint))
             .route("/ppvsu/{id}", get(Self::get_ppvsu_game_endpoint))
             .route(
@@ -31,6 +32,12 @@ impl StreamController {
                 get(Self::get_ppvsu_decoded_game_endpoint),
             )
             .route("/ppvsu/{id}/signed-url", get(Self::get_signed_url_endpoint))
+            // sportsurge routes
+            .route("/sportsurge", get(Self::get_sportsurge_events_endpoint))
+            .route("/sportsurge/{id}/embed", get(Self::get_sportsurge_embed_endpoint))
+            .route("/sportsurge/refresh", get(Self::refresh_sportsurge_endpoint))
+            .route("/sportsurge/cache", get(Self::clear_sportsurge_cache_endpoint))
+            .route("/sportsurge/cache", delete(Self::clear_sportsurge_cache_endpoint))
             .route("/{provider}", get(Self::get_stream_endpoint))
     }
 
@@ -131,5 +138,76 @@ impl StreamController {
             signed_url,
             expires_at: expiry,
         }))
+    }
+
+    // ===================================================================
+    // SPORTSURGE ENDPOINTS
+    // ===================================================================
+
+    pub async fn get_sportsurge_events_endpoint(
+        EdgeAuthentication(_client_id, services): EdgeAuthentication,
+    ) -> AppResult<Json<SportsurgeEventListResponse>> {
+        info!("getting sportsurge events");
+
+        let events = services.sportsurge.get_events().await?;
+        
+        let dtos: Vec<SportsurgeEventDto> = events
+            .into_iter()
+            .map(|event| SportsurgeEventDto {
+                id: event.id,
+                title: event.title,
+                league: event.league,
+                banner: crate::server::services::sportsurge_scraper::DEFAULT_MATCH_BANNER.to_string(),
+                start_time: event.start_time,
+                status: event.status,
+                is_live: event.is_live,
+                event_path: event.event_path,
+                embed_url: None,
+            })
+            .collect();
+
+        Ok(Json(SportsurgeEventListResponse { events: dtos }))
+    }
+
+    pub async fn get_sportsurge_embed_endpoint(
+        EdgeAuthentication(_client_id, services): EdgeAuthentication,
+        Path(id): Path<String>,
+    ) -> AppResult<Json<SportsurgeStreamResponse>> {
+        info!("getting sportsurge embed for event {}", id);
+
+        let embed_url = services.sportsurge.get_stream_url(&id).await?;
+
+        Ok(Json(SportsurgeStreamResponse {
+            event_id: id,
+            embed_url,
+        }))
+    }
+
+    pub async fn refresh_sportsurge_endpoint(
+        EdgeAuthentication(_client_id, services): EdgeAuthentication,
+    ) -> AppResult<Json<serde_json::Value>> {
+        info!("force refreshing sportsurge cache");
+
+        services.sportsurge.clear_cache().await?;
+        let events = services.sportsurge.scrape_events().await?;
+
+        Ok(Json(serde_json::json!({
+            "success": true,
+            "count": events.len(),
+            "message": "Sportsurge re-scraped"
+        })))
+    }
+
+    pub async fn clear_sportsurge_cache_endpoint(
+        EdgeAuthentication(_client_id, services): EdgeAuthentication,
+    ) -> AppResult<Json<serde_json::Value>> {
+        info!("clearing sportsurge cache");
+
+        services.sportsurge.clear_cache().await?;
+
+        Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "Cache cleared"
+        })))
     }
 }

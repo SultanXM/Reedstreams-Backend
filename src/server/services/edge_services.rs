@@ -5,20 +5,22 @@ use tracing::info;
 use crate::{
     config::AppConfig,
     database::Database,
-    server::{
-        services::{
-            cookie_services::CookieService, ppvsu_services::PpvsuService,
-            stream_services::StreamsService,
-        },
-        utils::signature_utils::SignatureUtil,
+    server::services::{
+        cookie_services::CookieService,
+        ppvsu_services::PpvsuService,
+        sportsurge_scraper::SportsurgeScraper,
+        stream_services::StreamsService,
     },
+    server::utils::signature_utils::SignatureUtil,
 };
 
 use super::{
-    chat_services::ChatService,
-    cookie_services::DynCookieService, ppvsu_services::DynPpvsuService,
-    proxy_cache_services::DynProxyCacheService, rate_limit_services::DynRateLimitService,
-    stream_services::DynStreamsService, views_services::{DynViewsService, ViewsService},
+    cookie_services::DynCookieService,
+    ppvsu_services::DynPpvsuService,
+    proxy_cache_services::DynProxyCacheService,
+    rate_limit_services::DynRateLimitService,
+    sportsurge_scraper::DynSportsurgeScraper,
+    stream_services::DynStreamsService,
 };
 
 /// edge services without database dependencies
@@ -28,11 +30,10 @@ pub struct EdgeServices {
     pub signature_util: Arc<SignatureUtil>,
     pub streams: DynStreamsService,
     pub ppvsu: DynPpvsuService,
+    pub sportsurge: DynSportsurgeScraper,
     pub rate_limit: DynRateLimitService,
     pub cookies: DynCookieService,
     pub proxy_cache: DynProxyCacheService,
-    pub views: DynViewsService,
-    pub chat: Arc<ChatService>,
     pub http: reqwest::Client,
     pub db: Arc<Database>,
     pub config: Arc<AppConfig>,
@@ -66,6 +67,9 @@ impl EdgeServices {
         let ppvsu = Arc::new(PpvsuService::new(db_arc.clone())) as DynPpvsuService;
         let streams = Arc::new(StreamsService::new(db_arc.clone(), ppvsu.clone()))
             as DynStreamsService;
+        
+        // Sportsurge scraper - scrapes sportsurge.ws homepage
+        let sportsurge = Arc::new(SportsurgeScraper::new(db_arc.clone())) as DynSportsurgeScraper;
 
         let rate_limit = Arc::new(super::rate_limit_services::EdgeRateLimitService::new(
             db_arc.clone(),
@@ -79,18 +83,16 @@ impl EdgeServices {
             http.clone(),
         )) as DynProxyCacheService;
 
-        let views = Arc::new(ViewsService::new(db_arc.clone())) as DynViewsService;
-        let chat = Arc::new(ChatService::new());
+
 
         Self {
             signature_util,
             streams,
             ppvsu,
+            sportsurge,
             rate_limit,
             cookies,
             proxy_cache,
-            views,
-            chat,
             http,
             db: db_arc,
             config,

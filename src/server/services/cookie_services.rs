@@ -43,6 +43,7 @@ impl CookieServiceTrait for CookieService {
         let key = self.cookie_key(domain);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();

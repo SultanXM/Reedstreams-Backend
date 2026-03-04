@@ -168,6 +168,7 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
         let seg_key = Self::segment_key(url);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(redis) => {
                 use redis::AsyncCommands;
                 let mut conn = redis.connection.clone();
@@ -217,6 +218,7 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
         let key = Self::m3u8_key(url);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(redis) => {
                 use redis::AsyncCommands;
                 let mut conn = redis.connection.clone();
@@ -249,6 +251,7 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
         let key = Self::segment_key(url);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(redis) => {
                 use redis::AsyncCommands;
                 let mut conn = redis.connection.clone();
@@ -265,7 +268,7 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
                 }
             }
             Database::Memory(mem) => {
-                let encoded = base64::encode(bytes);
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let result = mem.store.set_ex(&key, &encoded, SEGMENT_TTL_SECONDS).await;
                 match result {
                     Ok(_) => debug!(
@@ -370,6 +373,7 @@ impl ProxyCacheServiceTrait for ProxyCacheService {
 
         // Check which URLs are already cached
         let uncached: Vec<String> = match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(redis) => {
                 use redis::AsyncCommands;
                 let mut conn = redis.connection.clone();

@@ -160,10 +160,9 @@ impl EdgeApplicationServer {
         )
         .expose_headers([header::CONTENT_LENGTH, header::CONTENT_RANGE]);
 
-        // edge routes: streams, proxy, health, views (with CORS)
+        // edge routes: streams, proxy, health (with CORS)
         let api_routes = Router::new()
             .nest("/streams", api::stream_controller::StreamController::app())
-            .nest("/views", api::views_controller::ViewsController::app())
             .route("/health", get(api::health_controller::health_endpoint))
             .layer(cors);
 
@@ -171,15 +170,11 @@ impl EdgeApplicationServer {
             .nest("/proxy", api::proxy_controller::ProxyController::app())
             .layer(proxy_cors);
 
-        // Main API router - add chat route directly with correct path
+        // Main API router
         let api_router = Router::new()
             .route("/", get(api::health_controller::health_endpoint))
             .route("/metrics", get(move || ready(recorder_handle.render())))
-            // Add chat route directly at the path we want
-            .route("/api/v1/chat/ws", get(api::chat_controller::ChatController::ws_handler))
-            // Nest other API routes
             .nest("/api/v1", api_routes.merge(proxy_routes))
-            // Extension layer provides services to ALL routes above
             .layer(Extension(services))
             .layer(
                 ServiceBuilder::new()

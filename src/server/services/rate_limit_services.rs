@@ -111,6 +111,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.rate_limit_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -180,6 +181,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.error_count_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -250,6 +252,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.timeout_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -285,6 +288,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.timeout_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -326,6 +330,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.timeout_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
@@ -358,6 +363,7 @@ impl RateLimitServiceTrait for EdgeRateLimitService {
         let key = self.error_count_key(client_id);
 
         match self.db.as_ref() {
+            #[allow(unused_imports)]
             Database::Redis(db) => {
                 use redis::AsyncCommands;
                 let mut conn = db.connection.clone();
