@@ -22,10 +22,10 @@ const CACHE_TTL_SECONDS: i64 = 1800;
 
 // Base domain for building URLs
 const SPORTSURGE_BASE: &str = "https://sportsurge.ws";
-// NCAA basketball streams page (what we scrape)
+// NCAA basketball streams page
 const SPORTSURGE_LISTINGS_URL: &str = "https://sportsurge.ws/ncaa/livestreams2";
 
-// Default banner for matches (NBA/college game placeholder)
+// Default banner for matches
 pub const DEFAULT_MATCH_BANNER: &str = "https://images.unsplash.com/photo-1546519638-68e109498ffc?w=1200&h=600&fit=crop";
 
 /// Generate a short hash (8 chars) from a string
