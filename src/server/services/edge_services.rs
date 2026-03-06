@@ -64,7 +64,15 @@ impl EdgeServices {
             .build()
             .expect("Failed to build HTTP client");
 
-        let ppvsu = Arc::new(PpvsuService::new(db_arc.clone())) as DynPpvsuService;
+        let ppvsu_concrete = PpvsuService::new(db_arc.clone());
+        
+        // Start the warp dance so we don't get banned
+        info!("Starting WARP background cache refresh task...");
+        ppvsu_concrete.start_warp_refresh_task();
+        
+        // Convert to trait object
+        let ppvsu: DynPpvsuService = Arc::new(ppvsu_concrete);
+        
         let streams = Arc::new(StreamsService::new(db_arc.clone(), ppvsu.clone()))
             as DynStreamsService;
         
