@@ -901,7 +901,7 @@ impl PpvsuServiceTrait for PpvsuService {
     }
 
     async fn is_cache_stale(&self, cache_time: i64, current_time: i64) -> bool {
-        const CACHE_TTL: i64 = 3600; // 1 hour
+        const CACHE_TTL: i64 = 5400; // 1.5 hours
         current_time - cache_time > CACHE_TTL
     }
 }
