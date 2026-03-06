@@ -163,7 +163,9 @@ impl EdgeApplicationServer {
         // edge routes: streams, proxy, health (with CORS)
         let api_routes = Router::new()
             .nest("/streams", api::stream_controller::StreamController::app())
+            .route("/streams/", get(Self::streams_root_redirect))
             .route("/health", get(api::health_controller::health_endpoint))
+            .route("/health/", get(api::health_controller::health_endpoint))
             .layer(cors);
 
         let proxy_routes = Router::new()
@@ -261,6 +263,15 @@ impl EdgeApplicationServer {
             "errors":{
             "message": vec!(String::from("This resource doesn't exist.")),}
             })),
+        )
+    }
+
+    /// Redirect /api/v1/streams/ to /api/v1/streams
+    async fn streams_root_redirect() -> impl IntoResponse {
+        (
+            StatusCode::PERMANENT_REDIRECT,
+            [(header::LOCATION, "/api/v1/streams")],
+            "",
         )
     }
 }

@@ -6,8 +6,12 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 use flate2::read::GzDecoder;
 use mockall::automock;
 use std::io::Read;
+use std::process::Command;
 use std::sync::Arc;
-use tracing::{error, info};
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::{interval, sleep};
+use tracing::{error, info, warn};
 
 use crate::{
     database::{
@@ -16,6 +20,21 @@ use crate::{
     },
     server::error::{AppResult, Error},
 };
+
+#[derive(Debug, Clone)]
+struct WarpRefreshState {
+    in_progress: Arc<Mutex<bool>>,
+    last_refresh: Arc<Mutex<Option<i64>>>,
+}
+
+impl WarpRefreshState {
+    fn new() -> Self {
+        Self {
+            in_progress: Arc::new(Mutex::new(false)),
+            last_refresh: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 pub type DynPpvsuService = Arc<dyn PpvsuServiceTrait + Send + Sync>;
 
@@ -186,6 +205,7 @@ pub trait PpvsuServiceTrait {
 pub struct PpvsuService {
     repository: DynStreamsRepository,
     http_client: reqwest::Client,
+    refresh_state: WarpRefreshState,
 }
 
 impl PpvsuService {
@@ -200,6 +220,150 @@ impl PpvsuService {
         Self {
             repository: db,
             http_client,
+            refresh_state: WarpRefreshState::new(),
+        }
+    }
+
+    pub fn start_warp_refresh_task(&self) {
+        let service = self.clone();
+        
+        tokio::spawn(async move {
+            info!("Starting WARP background refresh task");
+            
+            // Check every minute
+            let mut ticker = interval(Duration::from_secs(60));
+            
+            loop {
+                ticker.tick().await;
+                
+                // Check if 55 mins passed
+                if let Err(e) = service.check_and_refresh_via_warp().await {
+                    error!("WARP refresh cycle failed: {}", e);
+                }
+            }
+        });
+    }
+
+    async fn check_and_refresh_via_warp(&self) -> AppResult<()> {
+        // Get last fetch time
+        let last_fetch = self.repository.get_last_fetch_time("ppvsu").await?;
+        let current_time = self.get_current_timestamp().await?;
+        
+        // Check if 60 minutes passed (3600 seconds)
+        const REFRESH_INTERVAL: i64 = 3600; // 60 minutes
+        
+        let should_refresh = match last_fetch {
+            None => true,
+            Some(last) => (current_time - last) >= REFRESH_INTERVAL,
+        };
+        
+        if !should_refresh {
+            return Ok(());
+        }
+        
+        // Lock so only one refresh runs
+        let mut in_progress = self.refresh_state.in_progress.lock().await;
+        if *in_progress {
+            warn!("WARP refresh already in progress, skipping");
+            return Ok(());
+        }
+        *in_progress = true;
+        drop(in_progress); // Release lock while we work
+        
+        info!("Starting WARP cache refresh");
+        
+        // Do the warp dance
+        match self.refresh_via_warp_with_retry().await {
+            Ok(()) => {
+                info!("WARP cache refresh completed successfully");
+                let mut last = self.refresh_state.last_refresh.lock().await;
+                *last = Some(current_time);
+                // Also update Redis so API knows cache is fresh
+                if let Err(e) = self.repository.set_last_fetch_time("ppvsu", current_time).await {
+                    error!("Failed to set last fetch time: {}", e);
+                }
+            }
+            Err(e) => {
+                error!("WARP cache refresh failed after retries: {}", e);
+                // Keep old cache, retry later
+            }
+        }
+        
+        // Release lock
+        let mut in_progress = self.refresh_state.in_progress.lock().await;
+        *in_progress = false;
+        
+        Ok(())
+    }
+
+    async fn refresh_via_warp_with_retry(&self) -> AppResult<()> {
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_SECS: u64 = 30;
+        
+        for attempt in 1..=MAX_RETRIES {
+            info!("WARP refresh attempt {}/{}", attempt, MAX_RETRIES);
+            
+            // Connect
+            if let Err(e) = self.warp_connect().await {
+                error!("WARP connect failed: {}", e);
+                sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+                continue;
+            }
+            
+            // Wait for connection
+            sleep(Duration::from_secs(5)).await;
+            
+            // Fetch
+            match self.fetch_and_cache_games().await {
+                Ok(_games) => {
+                    info!("Successfully fetched and cached via WARP");
+                    // Disconnect
+                    let _ = self.warp_disconnect().await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Fetch via WARP failed: {}", e);
+                    let _ = self.warp_disconnect().await;
+                    sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+                }
+            }
+        }
+        
+        Err(Error::InternalServerErrorWithContext(
+            "WARP refresh failed after max retries".to_string()
+        ))
+    }
+
+    async fn warp_connect(&self) -> anyhow::Result<()> {
+        info!("Executing: warp-cli connect");
+        let output = Command::new("warp-cli")
+            .arg("connect")
+            .output()?;
+        
+        if output.status.success() {
+            // Check what IP we got
+            let ip_output = Command::new("curl")
+                .args(&["-s", "ipinfo.io/ip"])
+                .output()?;
+            let ip = String::from_utf8_lossy(&ip_output.stdout).trim().to_string();
+            info!("WARP connected with IP: {}", ip);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("warp-cli connect failed: {}", 
+                String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+
+    async fn warp_disconnect(&self) -> anyhow::Result<()> {
+        let output = Command::new("warp-cli")
+            .arg("disconnect")
+            .output()?;
+        
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("warp-cli disconnect failed: {}", 
+                String::from_utf8_lossy(&output.stderr)))
         }
     }
 
@@ -573,45 +737,29 @@ impl PpvsuServiceTrait for PpvsuService {
     }
 
     async fn get_games_with_refresh(&self) -> AppResult<Vec<Game>> {
-        info!("retrieving games with refresh logic");
+        info!("retrieving games (WARP mode: serving cache only)");
 
-        let cache_time = self.repository.get_last_fetch_time("ppvsu").await?;
-        let current_time = self.get_current_timestamp().await?;
+        // WARP MODE: Never fetch directly, only serve cached data
+        // The background WARP task handles all fetching
+        let games = self.repository.get_games("ppvsu").await.map_err(|e| {
+            error!("failed to get games from cache: {}", e);
+            Error::InternalServerErrorWithContext(format!(
+                "failed to get games from cache: {}",
+                e
+            ))
+        })?;
 
-        match cache_time {
-            Some(last_fetch) if !self.is_cache_stale(last_fetch, current_time).await => {
-                let cache_age = current_time - last_fetch;
-                info!(
-                    "overall cache is fresh (last fetch {} seconds ago)",
-                    cache_age
-                );
-                self.repository.get_games("ppvsu").await.map_err(|e| {
-                    error!("failed to get games from cache: {}", e);
-                    Error::InternalServerErrorWithContext(format!(
-                        "failed to get games from cache: {}",
-                        e
-                    ))
-                })
-            }
-            _ => {
-                if let Some(last_fetch) = cache_time {
-                    let cache_age = current_time - last_fetch;
-                    info!(
-                        "overall cache is stale (last fetch {} seconds ago), refetching all games",
-                        cache_age
-                    );
-                } else {
-                    info!("no cache found, fetching all games");
-                }
-
-                self.repository.clear_cache("ppvsu").await?;
-                let games = self.fetch_and_cache_games().await?;
-                self.repository
-                    .set_last_fetch_time("ppvsu", current_time)
-                    .await?;
-                Ok(games)
+        // Check if cache is stale (for logging only)
+        if let Ok(Some(last_fetch)) = self.repository.get_last_fetch_time("ppvsu").await {
+            let current_time = self.get_current_timestamp().await.unwrap_or(0);
+            let cache_age = current_time - last_fetch;
+            
+            if cache_age > 3600 {
+                warn!("Cache is {} minutes old - WARP refresh should be running", cache_age / 60);
             }
         }
+
+        Ok(games)
 
         // let one_hour = 3600;
         // let games = self.repository.get_games("ppvsu").await?;
@@ -753,7 +901,7 @@ impl PpvsuServiceTrait for PpvsuService {
     }
 
     async fn is_cache_stale(&self, cache_time: i64, current_time: i64) -> bool {
-        const ONE_HOUR: i64 = 3600;
-        current_time - cache_time > ONE_HOUR
+        const CACHE_TTL: i64 = 5400; // 1.5 hours
+        current_time - cache_time > CACHE_TTL
     }
 }

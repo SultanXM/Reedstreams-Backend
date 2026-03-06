@@ -65,6 +65,7 @@ impl EdgeServices {
             .expect("Failed to build HTTP client");
 
         let ppvsu = Arc::new(PpvsuService::new(db_arc.clone())) as DynPpvsuService;
+        
         let streams = Arc::new(StreamsService::new(db_arc.clone(), ppvsu.clone()))
             as DynStreamsService;
         

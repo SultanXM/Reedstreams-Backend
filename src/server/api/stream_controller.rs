@@ -24,20 +24,27 @@ impl StreamController {
         Router::new()
             // all routes
             .route("/", get(Self::get_all_streams_endpoint))
-            // ppvsu routes
+            // ppvsu routes (with trailing slash variants)
             .route("/ppvsu/cache", delete(Self::clear_ppvsu_cache_endpoint))
+            .route("/ppvsu/cache/", delete(Self::clear_ppvsu_cache_endpoint))
             .route("/ppvsu/{id}", get(Self::get_ppvsu_game_endpoint))
-            .route(
-                "/ppvsu/{id}/decode",
-                get(Self::get_ppvsu_decoded_game_endpoint),
-            )
+            .route("/ppvsu/{id}/", get(Self::get_ppvsu_game_endpoint))
+            .route("/ppvsu/{id}/decode", get(Self::get_ppvsu_decoded_game_endpoint))
+            .route("/ppvsu/{id}/decode/", get(Self::get_ppvsu_decoded_game_endpoint))
             .route("/ppvsu/{id}/signed-url", get(Self::get_signed_url_endpoint))
-            // sportsurge routes
+            .route("/ppvsu/{id}/signed-url/", get(Self::get_signed_url_endpoint))
+            // sportsurge routes (with trailing slash variants)
             .route("/sportsurge", get(Self::get_sportsurge_events_endpoint))
+            .route("/sportsurge/", get(Self::get_sportsurge_events_endpoint))
             .route("/sportsurge/{id}/embed", get(Self::get_sportsurge_embed_endpoint))
+            .route("/sportsurge/{id}/embed/", get(Self::get_sportsurge_embed_endpoint))
             .route("/sportsurge/refresh", get(Self::refresh_sportsurge_endpoint))
+            .route("/sportsurge/refresh/", get(Self::refresh_sportsurge_endpoint))
             .route("/sportsurge/cache", get(Self::clear_sportsurge_cache_endpoint))
+            .route("/sportsurge/cache/", get(Self::clear_sportsurge_cache_endpoint))
             .route("/sportsurge/cache", delete(Self::clear_sportsurge_cache_endpoint))
+            .route("/sportsurge/cache/", delete(Self::clear_sportsurge_cache_endpoint))
+            // catch-all provider route (must be last)
             .route("/{provider}", get(Self::get_stream_endpoint))
     }
 
