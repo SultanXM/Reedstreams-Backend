@@ -278,6 +278,10 @@ impl PpvsuService {
                 info!("WARP cache refresh completed successfully");
                 let mut last = self.refresh_state.last_refresh.lock().await;
                 *last = Some(current_time);
+                // Also update Redis so API knows cache is fresh
+                if let Err(e) = self.repository.set_last_fetch_time("ppvsu", current_time).await {
+                    error!("Failed to set last fetch time: {}", e);
+                }
             }
             Err(e) => {
                 error!("WARP cache refresh failed after retries: {}", e);
