@@ -249,8 +249,8 @@ impl PpvsuService {
         let last_fetch = self.repository.get_last_fetch_time("ppvsu").await?;
         let current_time = self.get_current_timestamp().await?;
         
-        // Check if 55 minutes passed (3300 seconds) - Production
-        const REFRESH_INTERVAL: i64 = 3300; // 55 minutes
+        // Check if 60 minutes passed (3600 seconds)
+        const REFRESH_INTERVAL: i64 = 3600; // 60 minutes
         
         let should_refresh = match last_fetch {
             None => true,
